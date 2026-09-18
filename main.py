@@ -1,4 +1,5 @@
 import os
+import io
 import random
 import asyncpg
 import cloudinary
@@ -12,7 +13,7 @@ from aiogram.types import (
     ReplyKeyboardRemove, LabeledPrice, PreCheckoutQuery
 )
 
-# 1. הגדרת משתני סביבה
+# 1. הגדרות סביבה
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -27,7 +28,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# 2. הגדרת מצבי FSM (מנוע מצבים)
+# 2. הגדרת מצבי FSM
 class Registration(StatesGroup):
     name = State()
     age = State()
@@ -36,9 +37,10 @@ class Registration(StatesGroup):
     bio = State()
     photos = State()
 
-# 3. תהליך הרשמה (Onboarding)
+# 3. התחלת הרשמה
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer("ברוכים הבאים! מתחילים בהרשמה.\nמה השם המלא שלך?")
     await state.set_state(Registration.name)
 
@@ -96,34 +98,39 @@ async def process_bio(message: Message, state: FSMContext):
     await message.answer("שלח בין 1 ל-3 תמונות פרופיל. כשתסיים, שלח את המילה 'סיימתי'.")
     await state.set_state(Registration.photos)
 
-@router.message(Registration.photos, F.photo)
+# 4. טיפול בתמונות (הורדה ישירה והעלאה ל-Cloudinary)
+@router.message(Registration.photos, F.photo | F.document)
 async def process_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
- # העלאת תמונות - גרסה יציבה
-@router.message(Registration.photos, F.photo)
-async def process_photos(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get("photos", [])
-    
-    try:
-        # 1. קבלת קישור ישיר לתמונה מטלגרם
+    if message.photo:
         photo = message.photo[-1]
-        file_info = await bot.get_file(photo.file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        
-        # 2. העלאה ישירה ל-Cloudinary דרך הקישור
-        upload_result = cloudinary.uploader.upload(file_url)
-        photos.append(upload_result['secure_url'])
-        
-        await state.update_data(photos=photos)
-        await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} נשלחו).\nכשתסיים, שלח את המילה 'סיימתי'.")
-    except Exception as e:
-        print(f"Cloudinary Upload Error: {e}")
-        await message.answer(f"❌ שגיאה בהעלאת התמונה:\n{e}\n\nודא שהגדרת ב-Render את משתני הסביבה של Cloudinary.")
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("image/"):
+        photo = message.document
+    else:
+        return await message.answer("אנא שלח תמונה בלבד.")
 
-# סיום העלאת תמונות ושמירה בבסיס הנתונים
+    try:
+        file_bytes = io.BytesIO()
+        await bot.download(photo, destination=file_bytes)
+        file_bytes.seek(0)
+        
+        upload_result = cloudinary.uploader.upload(file_bytes.read())
+        photo_url = upload_result.get('secure_url')
+        
+        if photo_url:
+            photos.append(photo_url)
+            await state.update_data(photos=photos)
+            await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} מתוך 3 נשלחו).\nכשתסיים, שלח את המילה 'סיימתי'.")
+        else:
+            await message.answer("❌ העלאת התמונה ל-Cloudinary נכשלה.")
+            
+    except Exception as e:
+        print(f"Photo error: {e}")
+        await message.answer(f"❌ שגיאה בהעלאת התמונה:\n{e}\n\nודא שמשתני Cloudinary ב-Render מוגדרים כראוי.")
+
+# 5. סיום העלאת תמונות ושמירה
 @router.message(Registration.photos, F.text)
 async def finish_photos(message: Message, state: FSMContext):
     text = message.text.strip().lower()
@@ -136,7 +143,7 @@ async def finish_photos(message: Message, state: FSMContext):
         
         if len(photos) > 3:
             photos = random.sample(photos, 3)
-        
+            
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             await conn.execute("""
@@ -154,9 +161,10 @@ async def finish_photos(message: Message, state: FSMContext):
             await message.answer(f"❌ שגיאה בשמירת הפרופיל בבסיס הנתונים:\n{e}")
     else:
         await message.answer("כדי לסיים את העלאת התמונות, שלח את המילה 'סיימתי'.")
-# 4. מנגנון תשלום ב-Telegram Stars
+
+# 6. מנגנון תשלום ב-Telegram Stars
 async def send_premium_invoice(chat_id: int):
-    prices = [LabeledPrice(label="מנוי פרימיום חודשי", amount=250)] # 250 כוכבים
+    prices = [LabeledPrice(label="מנוי פרימיום חודשי", amount=250)]
     await bot.send_invoice(
         chat_id=chat_id,
         title="מנוי פרימיום 🌟",
