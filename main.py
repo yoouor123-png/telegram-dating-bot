@@ -101,41 +101,55 @@ async def process_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
-    # הורדת התמונה והעלאה ל-Cloudinary
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
-    file_path = file_info.file_path
-    downloaded_file = await bot.download_file(file_path)
-    
-    upload_result = cloudinary.uploader.upload(downloaded_file.read())
-    photos.append(upload_result['secure_url'])
-    
-    await state.update_data(photos=photos)
-    await message.answer(f"תמונה נקלטה בהצלחה ({len(photos)} נשלחו).")
-
-@router.message(Registration.photos, F.text.lower() == "סיימתי")
-async def finish_photos(message: Message, state: FSMContext):
+   # העלאת תמונות
+@router.message(Registration.photos, F.photo)
+async def process_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
-    if len(photos) == 0:
-        return await message.answer("חובה להעלות לפחות תמונה אחת!")
-    
-    if len(photos) > 3:
-        photos = random.sample(photos, 3) # בחירת 3 תמונות אקראיות אם נשלחו יותר
-    
-    # שמירה בבסיס הנתונים (Supabase)
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("""
-        INSERT INTO users (telegram_id, full_name, age, gender, target_gender, bio, photos, location)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography)
-        ON CONFLICT (telegram_id) DO UPDATE 
-        SET full_name=$2, age=$3, gender=$4, target_gender=$5, bio=$6, photos=$7, location=ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography
-    """, message.from_user.id, data['name'], data['age'], data['gender'], data['target_gender'], data['bio'], photos, data['lon'], data['lat'])
-    await conn.close()
-    
-    await message.answer("הפרופיל נוצר בהצלחה! כעת תוכל להתחיל לצפות בהתאמות.")
-    await state.clear()
+    try:
+        # 1. הורדת התמונה מטלגרם
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # 2. העלאה ל-Cloudinary (שימוש ב-getvalue לקריאה מהתחלה)
+        upload_result = cloudinary.uploader.upload(downloaded_file.getvalue())
+        photos.append(upload_result['secure_url'])
+        
+        await state.update_data(photos=photos)
+        await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} נשלחו).\nכשתסיים, שלח את המילה 'סיימתי'.")
+    except Exception as e:
+        print(f"Error uploading photo: {e}")
+        await message.answer("אירעה שגיאה בהעלאת התמונה. ודא שהגדרת נכון את מפתחות Cloudinary ב-Render ונסה שוב.")
+
+# סיום העלאת תמונות ושמירה בבסיס הנתונים
+@router.message(Registration.photos, F.text)
+async def finish_photos(message: Message, state: FSMContext):
+    if message.text.strip().lower() in ["סיימתי", "סיימתי!", "finished"]:
+        data = await state.get_data()
+        photos = data.get("photos", [])
+        
+        if len(photos) == 0:
+            return await message.answer("חובה להעלות לפחות תמונה אחת לפני שמסיימים!")
+        
+        if len(photos) > 3:
+            photos = random.sample(photos, 3) # בחירת 3 תמונות אקראיות אם נשלחו יותר
+        
+        # שמירה בבסיס הנתונים (Supabase)
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute("""
+            INSERT INTO users (telegram_id, full_name, age, gender, target_gender, bio, photos, location)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography)
+            ON CONFLICT (telegram_id) DO UPDATE 
+            SET full_name=$2, age=$3, gender=$4, target_gender=$5, bio=$6, photos=$7, location=ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography
+        """, message.from_user.id, data['name'], data['age'], data['gender'], data['target_gender'], data['bio'], photos, data['lon'], data['lat'])
+        await conn.close()
+        
+        await message.answer("הפרופיל נוצר בהצלחה! 🎉 כעת תוכל להתחיל לצפות בהתאמות.")
+        await state.clear()
+    else:
+        await message.answer("כדי לסיים את העלאת התמונות, שלח את המילה 'סיימתי'.")
 
 # 4. מנגנון תשלום ב-Telegram Stars
 async def send_premium_invoice(chat_id: int):
