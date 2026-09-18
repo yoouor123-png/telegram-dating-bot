@@ -1,6 +1,8 @@
 import os
 import random
 import asyncpg
+import asyncio
+import logging
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -10,9 +12,22 @@ from aiogram.types import (
     ReplyKeyboardRemove, LabeledPrice, PreCheckoutQuery
 )
 
-# 1. הגדרות סביבה
+# הגדרת לוגים לניפוי שגיאות ב-Render
+logging.basicConfig(level=logging.INFO)
+
+# 1. טעינת משתני סביבה ובדיקת תקינות
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not BOT_TOKEN:
+    raise ValueError("CRITICAL ERROR: BOT_TOKEN is missing in Render Environment Variables!")
+
+if not DATABASE_URL:
+    raise ValueError("CRITICAL ERROR: DATABASE_URL is missing in Render Environment Variables!")
+
+# התאמת פורמט כתובת בסיס הנתונים עבור asyncpg
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -37,14 +52,16 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Registration.name)
 async def process_name(message: Message, state: FSMContext):
+    if not message.text:
+        return await message.answer("אנא שלח שם בטקסט.")
     await state.update_data(name=message.text)
     await message.answer("בן/בת כמה את/ה?")
     await state.set_state(Registration.age)
 
 @router.message(Registration.age)
 async def process_age(message: Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("אנא הזן מספר תקין.")
+    if not message.text or not message.text.isdigit():
+        return await message.answer("אנא הזן מספר תקין (לדוגמה: 25).")
     
     age = int(message.text)
     if age < 18:
@@ -84,32 +101,31 @@ async def process_gender(message: Message, state: FSMContext):
 
 @router.message(Registration.bio)
 async def process_bio(message: Message, state: FSMContext):
+    if not message.text:
+        return await message.answer("אנא כתוב תיאור קצר בטקסט.")
     await state.update_data(bio=message.text)
     await state.update_data(photos=[])
     await message.answer("שלח בין 1 ל-3 תמונות פרופיל. כשתסיים, שלח את המילה 'סיימתי'.")
     await state.set_state(Registration.photos)
 
-# 4. טיפול ישיר ומובטח בתמונות ובסיום הרשמה
+# 4. קליטת תמונות
 @router.message(Registration.photos)
 async def process_photos_step(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
 
-    # קליטת תמונה רגילה
     if message.photo:
         file_id = message.photo[-1].file_id
         photos.append(file_id)
         await state.update_data(photos=photos)
-        return await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} מתוך 3 נרשמו).\nכשתסיים, שלח את המילה 'סיימתי'.")
+        return await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} נרשמו).\nכשתסיים, שלח את המילה 'סיימתי'.")
 
-    # קליטת קובץ תמונה (Document)
     if message.document and message.document.mime_type and message.document.mime_type.startswith("image/"):
         file_id = message.document.file_id
         photos.append(file_id)
         await state.update_data(photos=photos)
-        return await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} מתוך 3 נרשמו).\nכשתסיים, שלח את המילה 'סיימתי'.")
+        return await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} נרשמו).\nכשתסיים, שלח את המילה 'סיימתי'.")
 
-    # קליטת המילה "סיימתי"
     if message.text:
         text = message.text.strip().lower()
         if text in ["סיימתי", "סיימתי!", "finished"]:
@@ -126,43 +142,29 @@ async def process_photos_step(message: Message, state: FSMContext):
                     VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography)
                     ON CONFLICT (telegram_id) DO UPDATE 
                     SET full_name=$2, age=$3, gender=$4, target_gender=$5, bio=$6, photos=$7, location=ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography
-                """, message.from_user.id, data['name'], data['age'], data['gender'], data['target_gender'], data['bio'], photos, data['lon'], data['lat'])
+                """, message.from_user.id, data.get('name'), data.get('age'), data.get('gender'), data.get('target_gender'), data.get('bio'), photos, data.get('lon'), data.get('lat'))
                 await conn.close()
                 
                 await message.answer("הפרופיל נוצר בהצלחה! 🎉 כעת תוכל להתחיל לצפות בהתאמות.")
                 await state.clear()
             except Exception as e:
-                print(f"Database Error: {e}")
-                await message.answer(f"❌ שגיאה בשמירת הפרופיל בבסיס הנתונים:\n{e}")
+                await message.answer(f"❌ שגיאה בשמירה ל-Supabase:\n`{e}`")
             return
         else:
             return await message.answer("כדי לסיים את העלאת התמונות, שלח את המילה 'סיימתי'.")
 
     await message.answer("אנא שלח תמונה או את המילה 'סיימתי'.")
 
-# 5. מנגנון תשלום ב-Telegram Stars
-async def send_premium_invoice(chat_id: int):
-    prices = [LabeledPrice(label="מנוי פרימיום חודשי", amount=250)]
-    await bot.send_invoice(
-        chat_id=chat_id,
-        title="מנוי פרימיום 🌟",
-        description="קבל לייקים ללא הגבלה והקפצה לראש התור באזור שלך!",
-        payload="premium_sub",
-        currency="XTR",
-        prices=prices
-    )
+# 5. ברירת מחדל
+@router.message()
+async def fallback(message: Message, state: FSMContext):
+    await message.answer("שלח /start כדי להתחיל בהרשמה.")
 
-@router.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@router.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("UPDATE users SET is_premium = TRUE WHERE telegram_id = $1", message.from_user.id)
-    await conn.close()
-    await message.answer("תודה! חשבונך שודרג בהצלחה למנוי פרימיום 🌟")
+# 6. הרצת התוכנית עם מחיקת Webhook
+async def main():
+    logging.info("Starting Telegram Bot...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
