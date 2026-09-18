@@ -12,20 +12,14 @@ from aiogram.types import (
     ReplyKeyboardRemove, LabeledPrice, PreCheckoutQuery
 )
 
-# הגדרת לוגים לניפוי שגיאות ב-Render
 logging.basicConfig(level=logging.INFO)
 
-# 1. טעינת משתני סביבה ובדיקת תקינות
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not BOT_TOKEN:
-    raise ValueError("CRITICAL ERROR: BOT_TOKEN is missing in Render Environment Variables!")
+if not BOT_TOKEN or not DATABASE_URL:
+    raise ValueError("CRITICAL ERROR: BOT_TOKEN or DATABASE_URL is missing!")
 
-if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL is missing in Render Environment Variables!")
-
-# התאמת פורמט כתובת בסיס הנתונים עבור asyncpg
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -34,7 +28,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# 2. הגדרת מצבי FSM
 class Registration(StatesGroup):
     name = State()
     age = State()
@@ -43,7 +36,6 @@ class Registration(StatesGroup):
     bio = State()
     photos = State()
 
-# 3. התחלת הרשמה
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -108,7 +100,6 @@ async def process_bio(message: Message, state: FSMContext):
     await message.answer("שלח בין 1 ל-3 תמונות פרופיל. כשתסיים, שלח את המילה 'סיימתי'.")
     await state.set_state(Registration.photos)
 
-# 4. קליטת תמונות
 @router.message(Registration.photos)
 async def process_photos_step(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -155,12 +146,10 @@ async def process_photos_step(message: Message, state: FSMContext):
 
     await message.answer("אנא שלח תמונה או את המילה 'סיימתי'.")
 
-# 5. ברירת מחדל
 @router.message()
 async def fallback(message: Message, state: FSMContext):
     await message.answer("שלח /start כדי להתחיל בהרשמה.")
 
-# 6. הרצת התוכנית עם מחיקת Webhook
 async def main():
     logging.info("Starting Telegram Bot...")
     await bot.delete_webhook(drop_pending_updates=True)
