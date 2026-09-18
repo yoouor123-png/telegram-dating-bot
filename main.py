@@ -101,44 +101,44 @@ async def process_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
-  # העלאת תמונות עם ניטור שגיאות
+ # העלאת תמונות - גרסה יציבה
 @router.message(Registration.photos, F.photo)
 async def process_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
     try:
-        # 1. הורדת התמונה מטלגרם
+        # 1. קבלת קישור ישיר לתמונה מטלגרם
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
         
-        # 2. העלאה ל-Cloudinary
-        upload_result = cloudinary.uploader.upload(downloaded_file)
+        # 2. העלאה ישירה ל-Cloudinary דרך הקישור
+        upload_result = cloudinary.uploader.upload(file_url)
         photos.append(upload_result['secure_url'])
         
         await state.update_data(photos=photos)
         await message.answer(f"תמונה נקלטה בהצלחה! 📸 ({len(photos)} נשלחו).\nכשתסיים, שלח את המילה 'סיימתי'.")
     except Exception as e:
-        # שליחת השגיאה המדויקת למשתמש בטלגרם
-        await message.answer(f"❌ שגיאה בהעלאת התמונה:\n`{str(e)}`", parse_mode="Markdown")
+        print(f"Cloudinary Upload Error: {e}")
+        await message.answer(f"❌ שגיאה בהעלאת התמונה:\n{e}\n\nודא שהגדרת ב-Render את משתני הסביבה של Cloudinary.")
 
-# סיום הרשמה ושמירה בבסיס הנתונים
+# סיום העלאת תמונות ושמירה בבסיס הנתונים
 @router.message(Registration.photos, F.text)
 async def finish_photos(message: Message, state: FSMContext):
-    if message.text.strip().lower() in ["סיימתי", "סיימתי!", "finished"]:
+    text = message.text.strip().lower()
+    if text in ["סיימתי", "סיימתי!", "finished"]:
         data = await state.get_data()
         photos = data.get("photos", [])
         
         if len(photos) == 0:
-            return await message.answer("חובה להעלות לפחות תמונה אחת!")
+            return await message.answer("חובה להעלות לפחות תמונה אחת לפני שמסיימים!")
         
         if len(photos) > 3:
             photos = random.sample(photos, 3)
-            
+        
         try:
-            # התחברות ל-Supabase עם הגדרת SSL
-            conn = await asyncpg.connect(DATABASE_URL, ssl="require")
+            conn = await asyncpg.connect(DATABASE_URL)
             await conn.execute("""
                 INSERT INTO users (telegram_id, full_name, age, gender, target_gender, bio, photos, location)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography)
@@ -150,7 +150,8 @@ async def finish_photos(message: Message, state: FSMContext):
             await message.answer("הפרופיל נוצר בהצלחה! 🎉 כעת תוכל להתחיל לצפות בהתאמות.")
             await state.clear()
         except Exception as e:
-            await message.answer(f"❌ שגיאה בשמירה בבסיס הנתונים:\n`{str(e)}`", parse_mode="Markdown")
+            print(f"Database Error: {e}")
+            await message.answer(f"❌ שגיאה בשמירת הפרופיל בבסיס הנתונים:\n{e}")
     else:
         await message.answer("כדי לסיים את העלאת התמונות, שלח את המילה 'סיימתי'.")
 # 4. מנגנון תשלום ב-Telegram Stars
