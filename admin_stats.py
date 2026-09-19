@@ -10,7 +10,8 @@ log = logging.getLogger(__name__)
 
 STATS_SQL = """
 SELECT COUNT(*) AS total,
-       COUNT(*) FILTER (WHERE is_active) AS active,
+       COUNT(*) FILTER (WHERE is_active AND moderation_status='approved') AS active,
+       COUNT(*) FILTER (WHERE moderation_status='unreviewed') AS pending,
        COUNT(*) FILTER (
            WHERE is_premium AND premium_until > NOW()
        ) AS premium
@@ -37,9 +38,10 @@ async def show_stats(message, get_pool, owner_id):
         "LoviraBot — נתוני מנהל\n\n"
         f"פרופילים רשומים: {counts['total']:,}\n"
         f"פעילים לתצוגה: {counts['active']:,}\n"
+        f"ממתינים לבדיקה אוטומטית: {counts['pending']:,}\n"
         f"מנויי Premium בתוקף: {counts['premium']:,}\n\n"
         "הספירה כוללת פרופילים שהשלימו הרשמה, ללא חשבונות שנמחקו.\n"
-        "פעילים = פרופילים שאינם מושהים; זה אינו מדד להתחברות לאחרונה.\n"
+        "פעילים = פרופילים מאושרים שאינם מושהים; זה אינו מדד להתחברות לאחרונה.\n"
         "Premium נספר גם בפרופיל מושהה, כל עוד התקופה ששולמה בתוקף.\n"
         "לרענון הנתונים: /stats"
     )

@@ -7,8 +7,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-CURRENT_TERMS_VERSION = "2025-02-draft-1"
-CURRENT_PRIVACY_VERSION = "2025-02-draft-1"
+CURRENT_TERMS_VERSION = "2025-02-draft-2-automatic-review"
+CURRENT_PRIVACY_VERSION = "2025-02-draft-2-automatic-review"
 INCOMPLETE = (
     "הבוט: @LoviraBot\n"
     "אימייל לפניות: Lovirabot@gmail.com\n\n"
@@ -18,7 +18,8 @@ INCOMPLETE = (
 PROCESSOR_LINKS = (
     "Telegram: https://telegram.org/privacy\n"
     "Render: https://render.com/privacy\n"
-    "Neon: https://neon.com/privacy-policy"
+    "Neon: https://neon.com/privacy-policy\n"
+    "OpenAI: https://openai.com/policies/privacy-policy/"
 )
 
 
@@ -39,6 +40,9 @@ def consent_text():
         "בלחיצה על „אני בן/בת 18+ ומסכים/ה” אני מאשר/ת במפורש:\n"
         "• שאני בן/בת 18 ומעלה ונמצא/ת בישראל;\n"
         "• שקראתי את /terms ואת /privacy;\n"
+        "• שהשם, התיאור והתמונות יישלחו ל־OpenAI לבדיקת תוכן אוטומטית "
+        "לפני פרסום, גם במהלך ההרשמה. תוכן שטרם אושר מוסתר מאחרים. "
+        "אין הבטחה לזיהוי מלא או לבטיחות; המקור נשלח לבוט ב־Telegram;\n"
         "• שפרופיל ההיכרויות שלי, כולל שם תצוגה, גיל, תמונות ותיאור, יוצג "
         "למשתמשים מתאימים;\n"
         "• עיבוד מיקום לצורכי התאמה (למשתמשים יוצג טווח מרחק גס בלבד);\n"
@@ -93,6 +97,14 @@ POLICIES = {
     "privacy": (
         "מדיניות פרטיות — טיוטה חלקית\n"
         f"גרסה {CURRENT_PRIVACY_VERSION}\n\n"
+        "בדיקת תוכן אוטומטית: לאחר הסכמה זו, השם, התיאור וכל התמונות נשלחים "
+        "ל־OpenAI, ללא מזהה Telegram או מיקום, לצורך סינון לפני פרסום. "
+        "הבדיקה עשויה לטעות; אינה אימות גיל או זהות ואינה מבטיחה בטיחות. "
+        "פרופילים קיימים מוסתרים עד להסכמה החדשה ולאישור אוטומטי. "
+        "תוכן שלא אושר לא מוצג לאחרים ולא מועבר למנהל לבדיקה ידנית. "
+        "נעשה ניסיון למחוק הודעה שנדחתה, אך מחיקה עשויה להיכשל ועותקי Telegram "
+        "אינם בשליטתנו. בקשות Responses נשלחות עם store=false; "
+        "אין בכך הבטחת אפס שמירה אצל הספק, הכפוף למדיניותו.\n\n"
         "נאספים פרטי Telegram (מזהה ושם משתמש אם קיים), שם תצוגה, גיל, "
         "מגדר והעדפת מגדר, תיאור, תמונות ומיקום מדויק שנשלח. המידע משמש להפעלת "
         "הפרופיל, התאמות, מרחקים, בטיחות, תמיכה, תשלום ומניעת שימוש לרעה. "
@@ -115,6 +127,11 @@ POLICIES = {
     "terms": (
         "תנאי שימוש — טיוטה חלקית\n"
         f"גרסה {CURRENT_TERMS_VERSION}\n\n"
+        "אסור להעלות תוכן מיני, חושפני או פוגעני, עירום, בגדי ים או הלבשה תחתונה, "
+        "או סמלי שנאה. אין לשלוח חומר ידוע או חשוד כפגיעה מינית בקטינים. "
+        "אין לפרש בדיקה אוטומטית כאישור חוקיות, זהות או גיל. "
+        "כשל בבדיקה חוסם פרסום; אפשר לתקן פרופיל עם /editprofile. "
+        "דחיית תוכן אינה חסימת חשבון או ביטול זכויות בתשלום.\n\n"
         "השירות מיועד לבני 18+ בישראל בלבד. יש למסור מידע שלך בלבד, לכבד הסכמה "
         "וגבולות, ולא לפרסם תוכן בלתי חוקי, מטריד, מאיים, מטעה או מפר זכויות. "
         "אין להשתמש בשירות לקטינים, ניצול, סחר, התחזות או הונאה. אסור להעלות "
@@ -183,6 +200,8 @@ async def anonymize_account(pool, telegram_id):
             return await connection.fetchval(
                 """UPDATE users SET username=NULL, full_name='נמחק', bio='',
                    photos='{}', latitude=NULL, longitude=NULL, is_active=FALSE,
+                   moderation_status='unreviewed',
+                   moderation_revision=moderation_revision+1,
                    age=18, gender='male', target_gender='female',
                    is_premium=FALSE, premium_until=NULL,
                    telegram_payment_charge_id=NULL, updated_at=NOW()
@@ -203,6 +222,7 @@ async def set_profile_visibility(pool, telegram_id, active):
             changed = await connection.fetchval(
                 """UPDATE users SET is_active=TRUE, updated_at=NOW()
                    WHERE telegram_id=$1 AND full_name<>'נמחק'
+                     AND moderation_status='approved'
                      AND latitude IS NOT NULL AND longitude IS NOT NULL
                      AND cardinality(photos)>0 AND bio<>''
                    RETURNING telegram_id""",
@@ -346,7 +366,7 @@ def register_legal(dp, bot, get_pool):
             )
         elif result == "incomplete":
             await message.answer(
-                "לא ניתן להפעיל פרופיל שנמחק או שאינו שלם. יש להתחיל ב־/start."
+                "לא ניתן להפעיל פרופיל שנמחק, אינו שלם או טרם אושר. יש להתחיל ב־/start."
             )
         else:
             await message.answer("לא נמצא פרופיל. אפשר להתחיל עם /start.")
@@ -361,7 +381,8 @@ def register_legal(dp, bot, get_pool):
                 user = await connection.fetchrow(
                 """SELECT telegram_id,username,full_name,age,gender,target_gender,
                    bio,photos,latitude,longitude,is_premium,premium_until,
-                   is_active,created_at,updated_at FROM users WHERE telegram_id=$1""",
+                   is_active,moderation_status,moderation_revision,created_at,updated_at
+                   FROM users WHERE telegram_id=$1""",
                 message.from_user.id,
             )
                 payments = await connection.fetch(

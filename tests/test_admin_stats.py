@@ -41,8 +41,8 @@ class AdminStatsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("למנהל", event.answer.call_args.args[0])
 
     async def test_live_counts_and_empty_database(self):
-        for values in [dict(total=1234, active=80, premium=7),
-                       dict(total=0, active=0, premium=0)]:
+        for values in [dict(total=1234, active=80, pending=50, premium=7),
+                       dict(total=0, active=0, pending=0, premium=0)]:
             connection = SimpleNamespace(fetchrow=AsyncMock(return_value=values))
             pool = SimpleNamespace(acquire=lambda: Acquire(connection))
             event = message()
@@ -64,4 +64,6 @@ class AdminStatsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("latitude IS NOT NULL", STATS_SQL)
         self.assertIn("cardinality(photos) > 0", STATS_SQL)
         self.assertIn("WHERE is_active", STATS_SQL)
+        self.assertIn("moderation_status='approved'", STATS_SQL)
+        self.assertIn("moderation_status='unreviewed'", STATS_SQL)
         self.assertIn("is_premium AND premium_until > NOW()", STATS_SQL)
