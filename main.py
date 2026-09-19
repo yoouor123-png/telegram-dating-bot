@@ -232,6 +232,7 @@ async def startup() -> None:
             [
                 BotCommand(command="browse", description="לראות פרופילים"),
                 BotCommand(command="profile", description="הפרופיל שלי"),
+                BotCommand(command="matches", description="המאצ׳ים שלי"),
                 BotCommand(command="premium", description="שדרוג לפרימיום"),
                 BotCommand(command="help", description="עזרה"),
                 BotCommand(command="terms", description="תנאי שימוש"),
@@ -797,6 +798,87 @@ def user_link(user_id: int, username: Optional[str]) -> str:
     )
 
 
+async def send_match_contact(chat_id: int, target) -> None:
+    # Prefer current Telegram details; a stored username can be stale.
+    target_id = target["telegram_id"]
+    username = None
+    try:
+        telegram_chat = await bot.get_chat(target_id)
+        username = telegram_chat.username
+    except Exception:
+        logger.warning("Could not refresh match contact for %s", target_id)
+        # Do not risk linking to a stale username now owned by someone else.
+
+    text = f"יש לכם Match! 🎉\n{target['full_name']}\n"
+    if username:
+        text += f"פתיחת שיחה: https://t.me/{username}"
+    else:
+        text += (
+            "לחץ על הכפתור לפתיחת הפרופיל.\n"
+            "אם Telegram אינו מאפשר לפתוח אותו, הצד השני יכול להגדיר "
+            "שם משתמש ציבורי בהגדרות Telegram. לאחר מכן שלח שוב /matches."
+        )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="💬 פתיחת הפרופיל בטלגרם",
+            url=user_link(target_id, username),
+        )
+    ]])
+    try:
+        await bot.send_message(chat_id, text, reply_markup=keyboard)
+    except Exception:
+        logger.warning("Could not send match contact button to %s", chat_id)
+        # Some Telegram privacy settings prevent ID-based buttons.
+        # A failure for one participant must not prevent notifying the other.
+        try:
+            await bot.send_message(
+                chat_id,
+                f"יש לכם Match! 🎉\n{target['full_name']}\n"
+                "לא ניתן היה לשלוח את כפתור הפרופיל. "
+                "אפשר להגדיר שם משתמש ציבורי בהגדרות Telegram "
+                "ולנסות שוב באמצעות /matches.",
+            )
+        except Exception:
+            logger.warning("Could not deliver match notification to %s", chat_id)
+
+
+@router.message(Command("matches"))
+async def matches_command(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("את המאצ׳ים אפשר לראות בשיחה פרטית עם הבוט בלבד.")
+        return
+    try:
+        connection_pool = await get_pool()
+        async with connection_pool.acquire() as connection:
+            targets = await connection.fetch(
+                """
+                SELECT u.telegram_id, u.full_name
+                FROM matches AS m
+                JOIN users AS u ON u.telegram_id =
+                    CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END
+                WHERE (m.user_a = $1 OR m.user_b = $1)
+                  AND u.is_active = TRUE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM blocked_users AS b
+                      WHERE (b.blocker_id = $1 AND b.blocked_id = u.telegram_id)
+                         OR (b.blocker_id = u.telegram_id AND b.blocked_id = $1)
+                  )
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT 20
+                """,
+                message.from_user.id,
+            )
+    except Exception:
+        await send_db_error(message)
+        return
+    if not targets:
+        await message.answer("אין כרגע מאצ׳ים פעילים להצגה.")
+        return
+    await message.answer("המאצ׳ים האחרונים שלך (עד 20):")
+    for target in targets:
+        await send_match_contact(message.chat.id, target)
+
+
 @router.callback_query(F.data.startswith("profile:"))
 async def profile_action(callback: CallbackQuery) -> None:
     try:
@@ -853,16 +935,8 @@ async def profile_action(callback: CallbackQuery) -> None:
         current = await fetch_user(callback.from_user.id)
         target = await fetch_user(target_id)
         if current and target:
-            await bot.send_message(
-                callback.from_user.id,
-                "יש לכם Match! 🎉\n"
-                f"{user_link(target_id, target['username'])}",
-            )
-            await bot.send_message(
-                target_id,
-                "יש לכם Match! 🎉\n"
-                f"{user_link(callback.from_user.id, current['username'])}",
-            )
+            await send_match_contact(callback.from_user.id, target)
+            await send_match_contact(target_id, current)
 
     await show_next_profile(callback.from_user.id)
 
@@ -982,6 +1056,7 @@ async def help_command(message: Message) -> None:
         "/start — הרשמה\n"
         "/browse — פרופילים\n"
         "/profile — הפרופיל שלי\n"
+        "/matches — המאצ׳ים שלי\n"
         "/premium — שדרוג Premium\n"
         "/cancel — ביטול הרשמה"
     )
