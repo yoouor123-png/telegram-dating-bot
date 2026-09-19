@@ -118,6 +118,17 @@ class Registration(StatesGroup):
 
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS support_tickets (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('general', 'payment')),
+    details TEXT NOT NULL CHECK (length(details) BETWEEN 5 AND 2000),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (chat_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS users (
     telegram_id BIGINT PRIMARY KEY,
     username TEXT,
@@ -1095,9 +1106,11 @@ async def main() -> None:
 
 if __name__ == "__main__":
     from premium_handlers import register_premium
+    from support_handlers import register_support
     register_premium(
         dp, bot, get_pool, fetch_user, premium_is_active,
         settings.premium_price_stars,
     )
+    register_support(dp, get_pool, settings.support_username)
     dp.include_router(router)
     asyncio.run(main())
