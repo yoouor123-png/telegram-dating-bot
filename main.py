@@ -1005,7 +1005,11 @@ async def support_command(message: Message) -> None:
 async def main() -> None:
     dp.startup.register(startup)
     dp.shutdown.register(shutdown)
-    await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
 
 
 if __name__ == "__main__":
