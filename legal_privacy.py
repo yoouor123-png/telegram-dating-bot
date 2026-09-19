@@ -10,8 +10,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 CURRENT_TERMS_VERSION = "2025-02-draft-1"
 CURRENT_PRIVACY_VERSION = "2025-02-draft-1"
 INCOMPLETE = (
-    "חשוב: המסמכים הם טיוטה חלקית. פרטי זהות המפעיל וכתובת למסירת הודעות "
-    "אינם מפורסמים כעת, ונדרשת השלמה ובדיקה משפטית בישראל. אין כאן הצהרת ציות."
+    "הבוט: @LoviraBot\n"
+    "אימייל לפניות: Lovirabot@gmail.com\n\n"
+    "חשוב: המסמכים הם טיוטה חלקית. פרטי הזהות המשפטית של המפעיל וכתובת "
+    "פיזית אינם מפורסמים כעת, ונדרשת השלמה ובדיקה משפטית בישראל. אין כאן הצהרת ציות."
 )
 PROCESSOR_LINKS = (
     "Telegram: https://telegram.org/privacy\n"
@@ -288,7 +290,7 @@ def register_legal(dp, bot, get_pool):
     @router.message(Command("legal"))
     async def center(message):
         await message.answer(
-            "מרכז מידע משפטי, פרטיות ובטיחות\n\n" + INCOMPLETE,
+            "LoviraBot — מרכז מידע משפטי, פרטיות ובטיחות\n\n" + INCOMPLETE,
             reply_markup=legal_keyboard(),
         )
 

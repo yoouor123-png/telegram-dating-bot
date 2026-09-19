@@ -266,6 +266,7 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             "• פרימיום: /premium\n"
             "• עזרה בתשלום: /paysupport"
         )
+        text += "\n\n@LoviraBot — אימייל לפניות: Lovirabot@gmail.com"
         if owner_id is None:
             text += (
                 "\n\nמפעיל תיבת הפניות טרם הוגדר, ולכן פניות קיימות וחדשות "

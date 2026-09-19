@@ -501,7 +501,7 @@ async def start(message: Message, state: FSMContext) -> None:
         return
 
     await message.answer(
-        "ברוכים הבאים! מתחילים הרשמה.\nאפשר לבטל בכל שלב עם /cancel."
+        "ברוכים הבאים ל־@LoviraBot! מתחילים הרשמה.\nאפשר לבטל בכל שלב עם /cancel."
     )
     await message.answer("מה שם התצוגה שלך? אין צורך בשם מלא.")
     await state.set_state(Registration.name)
