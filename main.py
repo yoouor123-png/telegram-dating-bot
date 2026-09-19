@@ -1106,12 +1106,12 @@ async def register_action(
                 return "missing_user"
 
             if action == "yes":
-                reset = (
-                    viewer["last_like_reset"] is None
-                    or viewer["last_like_reset"].date()
-                    < datetime.now(timezone.utc).date()
+                from daily_likes import count_for_today
+                count = count_for_today(
+                    viewer["last_like_reset"],
+                    viewer["daily_likes_count"],
+                    datetime.now(timezone.utc),
                 )
-                count = 0 if reset else viewer["daily_likes_count"]
                 if not premium_is_active(viewer) and count >= FREE_DAILY_LIKES:
                     return "limit"
                 await connection.execute(
@@ -1335,7 +1335,7 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
 
         if result == "limit":
             await callback.answer(
-                "הגעת למגבלת 10 סימוני 'כן' להיום.",
+                "ניצלת את 10 הלייקים להיום. המכסה מתחדשת בחצות לפי שעון ישראל.",
                 show_alert=True,
             )
             return
