@@ -57,7 +57,11 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(moderation.parse_verdict(review_tests.response(
             '{"allowed":false,"reason_code":"secret arbitrary output"}')), "unavailable")
         self.assertEqual(moderation.parse_verdict(review_tests.response(
-            '{"allowed":true,"reason_code":"sexual"}')), "unavailable")
+            '{"allowed":true,"reason_code":"nudity"}')), "unavailable")
+        for code in moderation.HISTORICAL_REASONS:
+            text = moderation.reason_message(code)
+            self.assertIn("/resetprofile", text)
+        self.assertNotIn("בגדי ים", moderation.reason_message("revealing"))
 
 
 class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
@@ -139,9 +143,9 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.user())["moderation_status"], "unreviewed")
         self.assertEqual(await set_profile_visibility(self.pool, 1, True), "incomplete")
         with patch.object(moderation, "moderate", AsyncMock(
-                return_value=moderation.Verdict("rejected", "revealing"))):
+                return_value=moderation.Verdict("rejected", "nudity"))):
             await moderation.review_existing(self.pool, self.bot, 1)
-        self.assertEqual((await self.user())["moderation_reason"], "revealing")
+        self.assertEqual((await self.user())["moderation_reason"], "nudity")
         for action, field in [("hide_name", "full_name"), ("hide_bio", "bio")]:
             await self.action(action)
             self.assertEqual((await self.user())[field], "")
@@ -247,11 +251,11 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         event = message(44)
         f = review_tests.load_functions(
             "check_submission", get_pool=AsyncMock(return_value=self.pool),
-            moderate=AsyncMock(return_value=moderation.Verdict("rejected", "offensive")),
+            moderate=AsyncMock(return_value=moderation.Verdict("rejected", "gambling")),
             report_failure=AsyncMock(), bot=self.bot)
         await record_current_acceptance(self.pool, 44, None, "ignored")
         self.assertFalse(await f.check_submission(event, name="Unstored rejected input"))
         self.assertEqual(await self.pool.fetchval(
-            "SELECT reason FROM submission_rejections WHERE telegram_id=44"), "offensive")
+            "SELECT reason FROM submission_rejections WHERE telegram_id=44"), "gambling")
         await admin.show_notices(event, self.pool, 44)
         self.assertIn("/resetprofile", "\n".join(c.args[0] for c in event.answer.call_args_list))

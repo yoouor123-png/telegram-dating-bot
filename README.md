@@ -158,16 +158,24 @@ Integration tests start disposable Unix-socket PostgreSQL clusters using `initdb
 and `pg_ctl`; they never use application database credentials. Schema is applied
 idempotently on the bot's first database access; the main operator controls deployment.
 
-Checks use `omni-moderation-latest` (any flagged category denies), followed by
-`gpt-5.4-mini` via Responses with a strict boolean JSON schema. The second layer
-also prohibits revealing clothing, non-explicit nudity, underwear, swimwear,
-offensive text and depicted hate. User content is explicitly untrusted input.
+Checks use `omni-moderation-latest` for the independent child-sexual-safety gate,
+followed by `gpt-5.4-mini` via Responses with a strict JSON schema. Automatic
+profile filtering is limited to actual nudity and gambling promotion/facilitation,
+plus the mandatory child-sexual-safety protection. Ordinary portraits, swimwear,
+revealing clothing, underwear and shirtless male torsos are not disallowed just
+because of clothing or exposed skin. Generic provider sexual, offensive or violence
+flags are not evidence of nudity and do not automatically reject the profile.
+User content is explicitly untrusted input. General terms, age eligibility,
+reports, blocks and administrator sanctions remain separate safety controls.
+The narrower rules do not expand data processing or invalidate existing consent;
+they do not reset approval or sanctions or automatically republish old rejections.
 The request format follows OpenAI's official Structured Outputs guide:
 https://developers.openai.com/api/docs/guides/structured-outputs
 (`text.format`, `type=json_schema`, `strict=true` for Responses).
 This reduces risk but does not guarantee detection, establish age or identity,
 or establish legality. Never knowingly submit or forward known/suspected CSAM;
-flagged content is not sent to the second model. No such imagery is used in tests.
+content flagged for sexual material involving minors is not sent to the second
+model. No such imagery is used in tests.
 
 Name, bio and each photo are checked before entering registration state. The
 complete profile is checked again before saving. Rejected incoming messages are

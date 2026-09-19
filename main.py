@@ -310,8 +310,18 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_hold BOOLEAN NOT NULL DEFAULT F
 ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_reason TEXT;
 CREATE TABLE IF NOT EXISTS submission_rejections (
     telegram_id BIGINT PRIMARY KEY,
-    reason TEXT NOT NULL CHECK(reason IN ('sexual','revealing','offensive','violence','other'))
+    reason TEXT NOT NULL CHECK(reason IN (
+        'sexual','revealing','offensive','violence','other',
+        'nudity','gambling','child_safety'
+    ))
 );
+ALTER TABLE submission_rejections
+    DROP CONSTRAINT IF EXISTS submission_rejections_reason_check;
+ALTER TABLE submission_rejections
+    ADD CONSTRAINT submission_rejections_reason_check CHECK(reason IN (
+        'sexual','revealing','offensive','violence','other',
+        'nudity','gambling','child_safety'
+    ));
 CREATE TABLE IF NOT EXISTS content_events (
     id BIGSERIAL PRIMARY KEY,
     telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -513,7 +523,7 @@ async def begin_registration(target, state: FSMContext, user_id: int) -> None:
     await state.update_data(profile_revision=revision if revision is not None else -1)
     await target.answer(
         "לפני פרסום, השם, התיאור וכל תמונה נשלחים ל־OpenAI לבדיקה אוטומטית. "
-        "אין לשלוח תוכן מיני, חושפני או פוגעני; אין לשלוח חומר ידוע או חשוד "
+        "אין לשלוח עירום או תוכן המקדם הימורים; אין לשלוח חומר ידוע או חשוד "
         "כפגיעה מינית בקטינים. המקור מגיע לבוט, אך לא יוצג לאחרים לפני אישור. "
         "אין הבטחת זיהוי מלאה. אפשר לבטל עם /cancel.\n"
         "מה שם התצוגה שלך? אין צורך בשם מלא."

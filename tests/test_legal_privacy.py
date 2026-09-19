@@ -19,6 +19,7 @@ from legal_privacy import (  # noqa: E402
     is_private_event,
     record_current_acceptance,
     set_profile_visibility,
+    POLICIES,
 )
 
 
@@ -70,6 +71,13 @@ class FakePool:
 
 
 class LegalTextTests(unittest.TestCase):
+    def test_filter_copy_allows_normal_clothing_and_keeps_child_safety(self):
+        terms = POLICIES["terms"]
+        self.assertIn("עירום ותוכן המקדם הימורים", terms)
+        self.assertIn("אינם סיבה לחסימה כשאין עירום", terms)
+        self.assertIn("הגנת קטינים נשמרת", terms)
+        self.assertNotIn("אסור להעלות תוכן מיני, חושפני", terms)
+
     def test_distance_is_always_coarse(self):
         self.assertEqual(coarse_distance_text(0.3), "עד 5 ק״מ")
         self.assertEqual(coarse_distance_text(4.99), "עד 5 ק״מ")
