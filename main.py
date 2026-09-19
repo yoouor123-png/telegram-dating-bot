@@ -9,9 +9,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -25,6 +26,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from legal_privacy import coarse_distance_text
+from moderation import moderate, report_failure, review_existing, register_moderation
 
 
 logging.basicConfig(
@@ -108,7 +110,7 @@ class Settings:
 
 settings = Settings.from_env()
 bot = Bot(token=settings.bot_token)
-dp = Dispatcher()
+dp = Dispatcher(events_isolation=SimpleEventIsolation())
 router = Router()
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
@@ -224,6 +226,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_payment_charge_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_status TEXT NOT NULL DEFAULT 'unreviewed';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
@@ -407,7 +411,7 @@ async def fetch_user(user_id: int):
             SELECT telegram_id, username, full_name, age, gender,
                    target_gender, bio, photos, latitude, longitude,
                    is_premium, premium_until, daily_likes_count,
-                   last_like_reset, is_active
+                   last_like_reset, is_active, moderation_status, moderation_revision
             FROM users
             WHERE telegram_id = $1
             """,
@@ -425,7 +429,7 @@ def premium_is_active(user) -> bool:
 
 
 async def send_db_error(message: Message) -> None:
-    logger.exception("Database operation failed")
+    logger.error("Database operation failed")
     await message.answer(
         "הבוט פעיל, אבל החיבור למסד הנתונים עדיין לא תקין. "
         "יש לבדוק את DATABASE_URL ב־Render."
@@ -459,6 +463,61 @@ async def require_current_consent(
     return False
 
 
+async def begin_registration(target, state: FSMContext, user_id: int) -> None:
+    # Invalidate old reviews immediately, without touching paid entitlement.
+    connection_pool = await get_pool()
+    async with connection_pool.acquire() as connection:
+        revision = await connection.fetchval(
+            """UPDATE users SET moderation_status='unreviewed',
+               moderation_revision=moderation_revision+1, updated_at=NOW()
+               WHERE telegram_id=$1 RETURNING moderation_revision""", user_id,
+        )
+    await state.update_data(profile_revision=revision if revision is not None else -1)
+    await target.answer(
+        "לפני פרסום, השם, התיאור וכל תמונה נשלחים ל־OpenAI לבדיקה אוטומטית. "
+        "אין לשלוח תוכן מיני, חושפני או פוגעני; אין לשלוח חומר ידוע או חשוד "
+        "כפגיעה מינית בקטינים. המקור מגיע לבוט, אך לא יוצג לאחרים לפני אישור. "
+        "אין הבטחת זיהוי מלאה. אפשר לבטל עם /cancel.\n"
+        "מה שם התצוגה שלך? אין צורך בשם מלא."
+    )
+    await state.set_state(Registration.name)
+
+
+async def check_submission(message, **content) -> bool:
+    from legal_privacy import has_current_acceptance
+    try:
+        accepted = await has_current_acceptance(await get_pool(), message.from_user.id)
+    except Exception:
+        await report_failure(message, "unavailable")
+        return False
+    if not accepted:
+        await message.answer("נדרשת הסכמה חדשה לפני בדיקה. פתח /start.")
+        return False
+    verdict = await moderate(bot, **content)
+    if verdict != "approved":
+        await report_failure(message, verdict, delete=True)
+        return False
+    return True
+
+
+async def ensure_review(message, user_id: int) -> bool:
+    try:
+        verdict = await review_existing(await get_pool(), bot, user_id)
+    except Exception:
+        verdict = "unavailable"
+    if verdict == "approved":
+        return True
+    if verdict == "rejected":
+        await message.answer(
+            "הפרופיל לא אושר ואינו מוצג. לתיקון: /start או /editprofile. "
+            "המנוי בתשלום לא נמחק."
+        )
+    else:
+        await report_failure(message, verdict)
+    return False
+
+
+@router.message(Command("editprofile"))
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -479,6 +538,8 @@ async def start(message: Message, state: FSMContext) -> None:
                 and current_user["latitude"] is not None
                 and current_user["longitude"] is not None
                 and current_user["photos"]
+                and current_user["moderation_status"] != "rejected"
+                and not message.text.startswith("/editprofile")
             ),
         )
     except Exception:
@@ -492,7 +553,11 @@ async def start(message: Message, state: FSMContext) -> None:
         and current_user["latitude"] is not None
         and current_user["longitude"] is not None
         and current_user["photos"]
+        and current_user["moderation_status"] != "rejected"
+        and not message.text.startswith("/editprofile")
     ):
+        if not await ensure_review(message, message.from_user.id):
+            return
         await message.answer(
             "הפרופיל שלך כבר קיים. מציג פרופיל חדש:",
             reply_markup=ReplyKeyboardRemove(),
@@ -500,11 +565,7 @@ async def start(message: Message, state: FSMContext) -> None:
         await show_next_profile(message.chat.id)
         return
 
-    await message.answer(
-        "ברוכים הבאים ל־@LoviraBot! מתחילים הרשמה.\nאפשר לבטל בכל שלב עם /cancel."
-    )
-    await message.answer("מה שם התצוגה שלך? אין צורך בשם מלא.")
-    await state.set_state(Registration.name)
+    await begin_registration(message, state, message.from_user.id)
 
 
 @router.callback_query(
@@ -539,11 +600,12 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer("ההסכמה נשמרה.")
     if data.get("pending_existing_profile"):
         await state.clear()
+        if not await ensure_review(callback.message, callback.from_user.id):
+            return
         await callback.message.answer("אפשר להמשיך להשתמש בפרופיל הקיים.")
         await show_next_profile(callback.from_user.id)
         return
-    await callback.message.answer("מה שם התצוגה שלך? אין צורך בשם מלא.")
-    await state.set_state(Registration.name)
+    await begin_registration(callback.message, state, callback.from_user.id)
 
 
 @router.message(Registration.consent)
@@ -562,6 +624,14 @@ async def cancel(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(StateFilter(Registration), F.document | F.video | F.animation | F.sticker | F.audio | F.voice)
+async def refuse_registration_files(message: Message) -> None:
+    await message.answer(
+        "הקובץ לא התקבל ולא נשמר בפרופיל. מסמכים, סרטונים ואנימציות אינם נתמכים. "
+        "יש לשלוח טקסט בשלב הטקסט, או תמונה רגילה בשלב התמונות."
+    )
+
+
 @router.message(Registration.name, F.text)
 async def registration_name(
     message: Message, state: FSMContext
@@ -569,6 +639,8 @@ async def registration_name(
     name = message.text.strip()
     if not 2 <= len(name) <= MAX_NAME_LENGTH:
         await message.answer("נא להזין שם באורך של 2 עד 80 תווים.")
+        return
+    if not await check_submission(message, name=name):
         return
     await state.update_data(name=name)
     await message.answer("בן/בת כמה את/ה?")
@@ -646,6 +718,8 @@ async def registration_bio(
     if not 1 <= len(bio) <= MAX_BIO_LENGTH:
         await message.answer("נא לכתוב תיאור באורך של עד 500 תווים.")
         return
+    if not await check_submission(message, bio=bio):
+        return
     await state.update_data(bio=bio, photos=[])
     await message.answer(
         "שלח 1 עד 3 תמונות. כשתסיים, כתוב 'סיימתי'."
@@ -663,6 +737,8 @@ async def registration_photo(
         await message.answer("אפשר להעלות עד 3 תמונות.")
         return
 
+    if not await check_submission(message, photos=[message.photo[-1].file_id]):
+        return
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
     await message.answer(
@@ -684,6 +760,10 @@ async def finish_photos_or_explain(
     if not photos:
         await message.answer("חובה להעלות לפחות תמונה אחת.")
         return
+    if not await check_submission(
+        message, name=data["name"], bio=data["bio"], photos=photos,
+    ):
+        return
 
     try:
         from legal_privacy import has_current_acceptance
@@ -697,16 +777,16 @@ async def finish_photos_or_explain(
             return
         connection_pool = await get_pool()
         async with connection_pool.acquire() as connection:
-            await connection.execute(
+            saved = await connection.fetchval(
                 """
                 INSERT INTO users (
                     telegram_id, username, full_name, age, gender,
                     target_gender, bio, photos, latitude, longitude,
-                    is_active, updated_at
+                    is_active, updated_at, moderation_status
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    TRUE, NOW()
+                    TRUE, NOW(), 'approved'
                 )
                 ON CONFLICT (telegram_id) DO UPDATE SET
                     username = EXCLUDED.username,
@@ -718,8 +798,11 @@ async def finish_photos_or_explain(
                     photos = EXCLUDED.photos,
                     latitude = EXCLUDED.latitude,
                     longitude = EXCLUDED.longitude,
-                    is_active = TRUE,
+                    moderation_status = 'approved',
+                    moderation_revision = users.moderation_revision + 1,
                     updated_at = NOW()
+                WHERE users.moderation_revision = $11
+                RETURNING telegram_id
                 """,
                 message.from_user.id,
                 message.from_user.username,
@@ -731,17 +814,32 @@ async def finish_photos_or_explain(
                 photos,
                 data["latitude"],
                 data["longitude"],
+                data.get("profile_revision", -1),
             )
     except Exception:
         await send_db_error(message)
         return
 
+    if saved is None:
+        await state.clear()
+        await message.answer("הפרופיל השתנה בזמן הבדיקה ולא פורסם. התחל שוב עם /start.")
+        return
     await state.clear()
     await message.answer(
-        "הפרופיל נשמר בהצלחה! 🎉",
+        "הפרופיל עבר בדיקה ונשמר! 🎉 אם הושהה בעבר, להפעלה: /resume.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await show_next_profile(message.chat.id)
+
+
+@router.message(Registration.name, F.document | F.video | F.animation | F.sticker)
+@router.message(Registration.bio, F.document | F.video | F.animation | F.sticker)
+@router.message(Registration.photos)
+async def unsupported_registration_media(message: Message) -> None:
+    await message.answer(
+        "המדיה לא התקבלה ולא נשמרה בפרופיל. יש לשלוח טקסט בשלב הטקסט "
+        "או תמונה רגילה בשלב התמונות, לא מסמכים, סרטונים או אנימציות."
+    )
 
 
 def distance_km(
@@ -772,6 +870,7 @@ async def next_candidate(viewer_id: int):
                    is_premium, premium_until
             FROM users
             WHERE telegram_id = $1 AND is_active = TRUE
+              AND moderation_status = 'approved'
             """,
             viewer_id,
         )
@@ -788,6 +887,7 @@ async def next_candidate(viewer_id: int):
               AND c.gender = $2
               AND c.target_gender = $3
               AND c.is_active = TRUE
+              AND c.moderation_status = 'approved'
               AND c.latitude IS NOT NULL
               AND c.longitude IS NOT NULL
               AND cardinality(c.photos) > 0
@@ -849,18 +949,28 @@ async def show_next_profile(chat_id: int) -> None:
         return
 
     candidate, distance = result
+    # Recheck after selection: edits/deletion immediately hide stale profiles.
+    current = await fetch_user(chat_id)
+    fresh = await fetch_user(candidate["telegram_id"])
+    if not visible_profile(current) or not visible_profile(fresh):
+        return
+    candidate = fresh
     premium = " 🌟" if premium_is_active(candidate) else ""
     caption = (
         f"{candidate['full_name']}, {candidate['age']}{premium}\n\n"
         f"{candidate['bio'] or 'ללא תיאור'}\n\n"
         f"מרחק משוער: {coarse_distance_text(distance)}"
     )
-    await bot.send_photo(
-        chat_id,
-        candidate["photos"][0],
-        caption=caption,
-        reply_markup=profile_keyboard(candidate["telegram_id"]),
-    )
+    try:
+        await bot.send_photo(
+            chat_id,
+            candidate["photos"][0],
+            caption=caption,
+            reply_markup=profile_keyboard(candidate["telegram_id"]),
+        )
+    except Exception:
+        logger.warning("Could not deliver approved profile")
+        await bot.send_message(chat_id, "לא ניתן להציג את הפרופיל כרגע.")
 
 
 @router.message(Command("browse"))
@@ -880,6 +990,8 @@ async def browse(message: Message, state: FSMContext) -> None:
             return
     except Exception:
         await send_db_error(message)
+        return
+    if not await ensure_review(message, message.from_user.id):
         return
     await show_next_profile(message.chat.id)
 
@@ -904,6 +1016,8 @@ async def profile(message: Message) -> None:
         f"הפרופיל שלך:\n"
         f"שם: {user['full_name']}\n"
         f"גיל: {user['age']}\n"
+        f"בדיקת תוכן: {user['moderation_status']} (unreviewed = טרם אושר)\n"
+        f"תצוגה: {'פעילה' if visible_profile(user) else 'מוסתרת'}\n"
         f"Premium: {status}\n\n"
         f"{user['bio']}"
     )
@@ -947,7 +1061,8 @@ async def register_action(
                 SELECT is_premium, premium_until, daily_likes_count,
                        last_like_reset
                 FROM users
-                WHERE telegram_id = $1
+                WHERE telegram_id = $1 AND is_active = TRUE
+                  AND moderation_status = 'approved'
                 FOR UPDATE
                 """,
                 from_user,
@@ -955,7 +1070,8 @@ async def register_action(
             if viewer is None:
                 return "missing_user"
             target_active = await connection.fetchval(
-                "SELECT is_active FROM users WHERE telegram_id=$1",
+                """SELECT is_active FROM users WHERE telegram_id=$1
+                   AND moderation_status='approved'""",
                 to_user,
             )
             if not target_active:
@@ -1021,6 +1137,10 @@ async def register_action(
             return "match"
 
 
+def visible_profile(user) -> bool:
+    return bool(user and user["is_active"] and user["moderation_status"] == "approved")
+
+
 def user_link(user_id: int, username: Optional[str]) -> str:
     return (
         f"https://t.me/{username}"
@@ -1030,6 +1150,10 @@ def user_link(user_id: int, username: Optional[str]) -> str:
 
 
 async def send_match_contact(chat_id: int, target) -> None:
+    viewer = await fetch_user(chat_id)
+    target = await fetch_user(target["telegram_id"])
+    if not visible_profile(viewer) or not visible_profile(target):
+        return
     # Prefer current Telegram details; a stored username can be stale.
     target_id = target["telegram_id"]
     username = None
@@ -1089,6 +1213,12 @@ async def matches_command(message: Message) -> None:
                     CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END
                 WHERE (m.user_a = $1 OR m.user_b = $1)
                   AND u.is_active = TRUE
+                  AND u.moderation_status = 'approved'
+                  AND EXISTS (
+                      SELECT 1 FROM users AS viewer
+                      WHERE viewer.telegram_id=$1 AND viewer.is_active=TRUE
+                        AND viewer.moderation_status='approved'
+                  )
                   AND NOT EXISTS (
                       SELECT 1 FROM blocked_users AS b
                       WHERE (b.blocker_id = $1 AND b.blocked_id = u.telegram_id)
@@ -1119,6 +1249,11 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("פעולה לא תקינה.", show_alert=True)
         return
     try:
+        viewer = await fetch_user(callback.from_user.id)
+        target = await fetch_user(target_id)
+        if not visible_profile(viewer) or not visible_profile(target):
+            await callback.answer("הפרופיל אינו זמין או טרם אושר.", show_alert=True)
+            return
         if not await require_current_consent(
             callback.from_user.id,
             callback.message,
@@ -1169,6 +1304,9 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
                 "הגעת למגבלת 10 סימוני 'כן' להיום.",
                 show_alert=True,
             )
+            return
+        if result in {"missing_user", "invalid", "blocked"}:
+            await callback.answer("הפעולה אינה זמינה.", show_alert=True)
             return
         await callback.answer("נשמר.")
 
@@ -1298,6 +1436,7 @@ async def successful_payment(message: Message) -> None:
 async def help_command(message: Message) -> None:
     await message.answer(
         "/start — הרשמה\n"
+        "/editprofile — תיקון הפרופיל ובדיקה אוטומטית חדשה\n"
         "/browse — פרופילים\n"
         "/profile — הפרופיל שלי\n"
         "/matches — המאצ׳ים שלי\n"
@@ -1341,6 +1480,7 @@ if __name__ == "__main__":
     from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
+    register_moderation(dp, settings.support_owner_telegram_id)
     register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)
     register_premium(
         dp, bot, get_pool, fetch_user, premium_is_active,
