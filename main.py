@@ -74,8 +74,8 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         price = int(os.getenv("PREMIUM_PRICE_STARS", "250"))
-        if price <= 0:
-            raise RuntimeError("PREMIUM_PRICE_STARS must be positive")
+        if not 1 <= price <= 10000:
+            raise RuntimeError("PREMIUM_PRICE_STARS must be between 1 and 10000")
 
         database_url = os.getenv("DATABASE_URL")
         return cls(
@@ -94,7 +94,6 @@ settings = Settings.from_env()
 bot = Bot(token=settings.bot_token)
 dp = Dispatcher()
 router = Router()
-dp.include_router(router)
 
 db_pool: Optional[asyncpg.Pool] = None
 db_schema_ready = False
@@ -234,6 +233,8 @@ async def startup() -> None:
                 BotCommand(command="profile", description="הפרופיל שלי"),
                 BotCommand(command="matches", description="המאצ׳ים שלי"),
                 BotCommand(command="premium", description="שדרוג לפרימיום"),
+                BotCommand(command="cancelpremium", description="ביטול חידוש פרימיום"),
+                BotCommand(command="paysupport", description="עזרה בתשלום"),
                 BotCommand(command="help", description="עזרה"),
                 BotCommand(command="terms", description="תנאי שימוש"),
                 BotCommand(command="support", description="תמיכה"),
@@ -941,7 +942,6 @@ async def profile_action(callback: CallbackQuery) -> None:
     await show_next_profile(callback.from_user.id)
 
 
-@router.message(Command("premium"))
 async def premium(message: Message) -> None:
     try:
         user = await fetch_user(message.from_user.id)
@@ -972,7 +972,6 @@ async def premium(message: Message) -> None:
     )
 
 
-@router.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery) -> None:
     if (
         query.invoice_payload != PREMIUM_PAYLOAD
@@ -988,7 +987,6 @@ async def pre_checkout(query: PreCheckoutQuery) -> None:
     await bot.answer_pre_checkout_query(query.id, ok=True)
 
 
-@router.message(F.successful_payment)
 async def successful_payment(message: Message) -> None:
     payment = message.successful_payment
     if payment is None or payment.invoice_payload != PREMIUM_PAYLOAD:
@@ -1070,7 +1068,7 @@ async def terms_command(message: Message) -> None:
     )
 
 
-@router.message(Command("support"))
+@router.message(Command("support", "paysupport"))
 async def support_command(message: Message) -> None:
     if settings.support_username:
         await message.answer(
@@ -1088,7 +1086,7 @@ async def fallback(message: Message) -> None:
 async def main() -> None:
     dp.startup.register(startup)
     dp.shutdown.register(shutdown)
-    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(
         bot,
         allowed_updates=dp.resolve_used_update_types(),
@@ -1096,4 +1094,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    from premium_handlers import register_premium
+    register_premium(
+        dp, bot, get_pool, fetch_user, premium_is_active,
+        settings.premium_price_stars,
+    )
+    dp.include_router(router)
     asyncio.run(main())
