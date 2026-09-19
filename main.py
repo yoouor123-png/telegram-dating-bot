@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
 import cloudinary
@@ -44,9 +45,9 @@ def required_env(name: str) -> str:
 class Settings:
     bot_token: str
     database_url: str
-    cloudinary_cloud_name: str
-    cloudinary_api_key: str
-    cloudinary_api_secret: str
+    cloudinary_cloud_name: Optional[str]
+    cloudinary_api_key: Optional[str]
+    cloudinary_api_secret: Optional[str]
     premium_price_stars: int
     support_username: str
 
@@ -63,24 +64,49 @@ class Settings:
                 "postgresql://",
                 1,
             )
+        parsed_url = urlsplit(database_url)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(
+                parsed_url.query,
+                keep_blank_values=True,
+            )
+            if key.lower() != "pgbouncer"
+        ]
+        database_url = urlunsplit(
+            (
+                parsed_url.scheme,
+                parsed_url.netloc,
+                parsed_url.path,
+                urlencode(query),
+                parsed_url.fragment,
+            )
+        )
 
         return cls(
             bot_token=required_env("BOT_TOKEN"),
             database_url=database_url,
-            cloudinary_cloud_name=required_env("CLOUDINARY_CLOUD_NAME"),
-            cloudinary_api_key=required_env("CLOUDINARY_API_KEY"),
-            cloudinary_api_secret=required_env("CLOUDINARY_API_SECRET"),
+            cloudinary_cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+            cloudinary_api_key=os.getenv("CLOUDINARY_API_KEY"),
+            cloudinary_api_secret=os.getenv("CLOUDINARY_API_SECRET"),
             premium_price_stars=price,
             support_username=os.getenv("SUPPORT_USERNAME", "").strip(),
         )
 
 
 settings = Settings.from_env()
-cloudinary.config(
-    cloud_name=settings.cloudinary_cloud_name,
-    api_key=settings.cloudinary_api_key,
-    api_secret=settings.cloudinary_api_secret,
-)
+if all(
+    (
+        settings.cloudinary_cloud_name,
+        settings.cloudinary_api_key,
+        settings.cloudinary_api_secret,
+    )
+):
+    cloudinary.config(
+        cloud_name=settings.cloudinary_cloud_name,
+        api_key=settings.cloudinary_api_key,
+        api_secret=settings.cloudinary_api_secret,
+    )
 
 bot = Bot(token=settings.bot_token)
 dp = Dispatcher()
@@ -436,15 +462,24 @@ async def registration_photo(
 
     try:
         telegram_photo = message.photo[-1]
-        telegram_file = await bot.get_file(telegram_photo.file_id)
-        downloaded = await bot.download_file(telegram_file.file_path)
-        image_bytes = downloaded.read()
-        uploaded = await asyncio.to_thread(
-            cloudinary.uploader.upload,
-            image_bytes,
-            folder="dating-bot/profiles",
-        )
-        photos.append(uploaded["secure_url"])
+        if all(
+            (
+                settings.cloudinary_cloud_name,
+                settings.cloudinary_api_key,
+                settings.cloudinary_api_secret,
+            )
+        ):
+            telegram_file = await bot.get_file(telegram_photo.file_id)
+            downloaded = await bot.download_file(telegram_file.file_path)
+            uploaded = await asyncio.to_thread(
+                cloudinary.uploader.upload,
+                downloaded.read(),
+                folder="dating-bot/profiles",
+            )
+            photos.append(uploaded["secure_url"])
+        else:
+            # Telegram file IDs are sufficient when Cloudinary is not configured.
+            photos.append(telegram_photo.file_id)
         await state.update_data(photos=photos)
         await message.answer(
             f"התמונה נקלטה ({len(photos)}/{MAX_PHOTOS})."
