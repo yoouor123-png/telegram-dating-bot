@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS postgis;
-
 CREATE TABLE IF NOT EXISTS users (
     telegram_id BIGINT PRIMARY KEY,
     username TEXT,
@@ -9,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     target_gender TEXT NOT NULL CHECK (target_gender IN ('male', 'female')),
     bio TEXT NOT NULL DEFAULT '',
     photos TEXT[] NOT NULL DEFAULT '{}',
-    location GEOGRAPHY(POINT, 4326) NOT NULL,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
     is_premium BOOLEAN NOT NULL DEFAULT FALSE,
     premium_until TIMESTAMPTZ,
     telegram_payment_charge_id TEXT,
@@ -19,6 +18,15 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_payment_charge_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS interactions (
     id BIGSERIAL PRIMARY KEY,
@@ -56,16 +64,3 @@ CREATE TABLE IF NOT EXISTS payments (
     premium_until TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS users_location_gist_idx
-    ON users USING GIST (location);
-CREATE INDEX IF NOT EXISTS users_matching_idx
-    ON users (is_active, gender, target_gender, is_premium);
-CREATE INDEX IF NOT EXISTS interactions_from_to_idx
-    ON interactions (from_user, to_user);
-CREATE INDEX IF NOT EXISTS interactions_to_from_idx
-    ON interactions (to_user, from_user);
-CREATE INDEX IF NOT EXISTS matches_user_a_idx
-    ON matches (user_a);
-CREATE INDEX IF NOT EXISTS matches_user_b_idx
-    ON matches (user_b);
