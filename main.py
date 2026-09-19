@@ -127,7 +127,8 @@ async def process_photos_step(message: Message, state: FSMContext):
                 photos = random.sample(photos, 3)
                 
             try:
-                conn = await asyncpg.connect(DATABASE_URL)
+                # חיבור מותאם ל-Supabase ללא statement cache
+                conn = await asyncpg.connect(DATABASE_URL, statement_cache_size=0)
                 await conn.execute("""
                     INSERT INTO users (telegram_id, full_name, age, gender, target_gender, bio, photos, location)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography)
