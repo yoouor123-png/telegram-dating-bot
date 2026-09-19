@@ -70,6 +70,7 @@ class Settings:
     database_url: Optional[str]
     premium_price_stars: int
     support_username: str
+    support_owner_telegram_id: Optional[int]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +79,19 @@ class Settings:
             raise RuntimeError("PREMIUM_PRICE_STARS must be between 1 and 10000")
 
         database_url = os.getenv("DATABASE_URL")
+        owner_value = os.getenv("SUPPORT_OWNER_TELEGRAM_ID")
+        owner_id = None
+        if owner_value is not None:
+            owner_value = owner_value.strip()
+            if not owner_value.isascii() or not owner_value.isdecimal():
+                raise RuntimeError(
+                    "SUPPORT_OWNER_TELEGRAM_ID must be a positive numeric Telegram ID"
+                )
+            owner_id = int(owner_value)
+            if owner_id <= 0:
+                raise RuntimeError(
+                    "SUPPORT_OWNER_TELEGRAM_ID must be a positive numeric Telegram ID"
+                )
         return cls(
             bot_token=required_env("BOT_TOKEN"),
             database_url=(
@@ -87,6 +101,7 @@ class Settings:
             ),
             premium_price_stars=price,
             support_username=os.getenv("SUPPORT_USERNAME", "").strip(),
+            support_owner_telegram_id=owner_id,
         )
 
 
@@ -98,6 +113,7 @@ router = Router()
 db_pool: Optional[asyncpg.Pool] = None
 db_schema_ready = False
 db_lock = asyncio.Lock()
+support_service = None
 
 MAX_PHOTOS = 3
 MAX_NAME_LENGTH = 80
@@ -128,6 +144,54 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (chat_id, message_id)
 );
+
+ALTER TABLE support_tickets
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE support_tickets
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE support_tickets
+    ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS support_ticket_events (
+    id BIGSERIAL PRIMARY KEY,
+    ticket_id BIGINT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+    actor_telegram_id BIGINT NOT NULL,
+    event_type TEXT NOT NULL,
+    detail TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS support_ticket_replies (
+    id BIGSERIAL PRIMARY KEY,
+    ticket_id BIGINT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+    owner_telegram_id BIGINT NOT NULL,
+    body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 3500),
+    delivery_status TEXT NOT NULL DEFAULT 'sending',
+    telegram_message_id BIGINT,
+    error_summary TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS support_ticket_notifications (
+    ticket_id BIGINT PRIMARY KEY REFERENCES support_tickets(id) ON DELETE CASCADE,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered_at TIMESTAMPTZ,
+    lease_until TIMESTAMPTZ,
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS support_tickets_status_created_idx
+    ON support_tickets (status, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS support_notifications_due_idx
+    ON support_ticket_notifications (next_attempt_at)
+    WHERE delivered_at IS NULL;
+
+INSERT INTO support_ticket_notifications (ticket_id)
+SELECT id FROM support_tickets
+ON CONFLICT (ticket_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id BIGINT PRIMARY KEY,
@@ -249,14 +313,22 @@ async def startup() -> None:
                 BotCommand(command="help", description="עזרה"),
                 BotCommand(command="terms", description="תנאי שימוש"),
                 BotCommand(command="support", description="תמיכה"),
+                BotCommand(
+                    command="support_identity",
+                    description="הצגת מזהה Telegram שלי",
+                ),
             ]
         )
     except Exception:
         logger.exception("Could not update Telegram command menu")
+    if support_service is not None:
+        support_service.start()
     logger.info("Telegram polling is starting")
 
 
 async def shutdown() -> None:
+    if support_service is not None:
+        await support_service.stop()
     await close_pool()
     await bot.session.close()
     logger.info("Bot stopped")
@@ -1111,6 +1183,12 @@ if __name__ == "__main__":
         dp, bot, get_pool, fetch_user, premium_is_active,
         settings.premium_price_stars,
     )
-    register_support(dp, get_pool, settings.support_username)
+    support_service = register_support(
+        dp,
+        bot,
+        get_pool,
+        settings.support_username,
+        settings.support_owner_telegram_id,
+    )
     dp.include_router(router)
     asyncio.run(main())
