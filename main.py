@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -7,15 +8,13 @@ from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
-import cloudinary
-import cloudinary.uploader
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    CallbackQuery,
     BotCommand,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -41,13 +40,34 @@ def required_env(name: str) -> str:
     return value
 
 
+def normalize_database_url(value: str) -> str:
+    if value.startswith("postgres://"):
+        value = value.replace("postgres://", "postgresql://", 1)
+
+    parsed = urlsplit(value)
+    query = [
+        (key, item)
+        for key, item in parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+        if key.lower() != "pgbouncer"
+    ]
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(query),
+            parsed.fragment,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
-    database_url: str
-    cloudinary_cloud_name: Optional[str]
-    cloudinary_api_key: Optional[str]
-    cloudinary_api_secret: Optional[str]
+    database_url: Optional[str]
     premium_price_stars: int
     support_username: str
 
@@ -57,62 +77,28 @@ class Settings:
         if price <= 0:
             raise RuntimeError("PREMIUM_PRICE_STARS must be positive")
 
-        database_url = required_env("DATABASE_URL")
-        if database_url.startswith("postgres://"):
-            database_url = database_url.replace(
-                "postgres://",
-                "postgresql://",
-                1,
-            )
-        parsed_url = urlsplit(database_url)
-        query = [
-            (key, value)
-            for key, value in parse_qsl(
-                parsed_url.query,
-                keep_blank_values=True,
-            )
-            if key.lower() != "pgbouncer"
-        ]
-        database_url = urlunsplit(
-            (
-                parsed_url.scheme,
-                parsed_url.netloc,
-                parsed_url.path,
-                urlencode(query),
-                parsed_url.fragment,
-            )
-        )
-
+        database_url = os.getenv("DATABASE_URL")
         return cls(
             bot_token=required_env("BOT_TOKEN"),
-            database_url=database_url,
-            cloudinary_cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-            cloudinary_api_key=os.getenv("CLOUDINARY_API_KEY"),
-            cloudinary_api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+            database_url=(
+                normalize_database_url(database_url)
+                if database_url
+                else None
+            ),
             premium_price_stars=price,
             support_username=os.getenv("SUPPORT_USERNAME", "").strip(),
         )
 
 
 settings = Settings.from_env()
-if all(
-    (
-        settings.cloudinary_cloud_name,
-        settings.cloudinary_api_key,
-        settings.cloudinary_api_secret,
-    )
-):
-    cloudinary.config(
-        cloud_name=settings.cloudinary_cloud_name,
-        api_key=settings.cloudinary_api_key,
-        api_secret=settings.cloudinary_api_secret,
-    )
-
 bot = Bot(token=settings.bot_token)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+
 db_pool: Optional[asyncpg.Pool] = None
+db_schema_ready = False
+db_lock = asyncio.Lock()
 
 MAX_PHOTOS = 3
 MAX_NAME_LENGTH = 80
@@ -133,8 +119,6 @@ class Registration(StatesGroup):
 
 
 SCHEMA_SQL = """
-CREATE EXTENSION IF NOT EXISTS postgis;
-
 CREATE TABLE IF NOT EXISTS users (
     telegram_id BIGINT PRIMARY KEY,
     username TEXT,
@@ -144,7 +128,8 @@ CREATE TABLE IF NOT EXISTS users (
     target_gender TEXT NOT NULL CHECK (target_gender IN ('male', 'female')),
     bio TEXT NOT NULL DEFAULT '',
     photos TEXT[] NOT NULL DEFAULT '{}',
-    location GEOGRAPHY(POINT, 4326) NOT NULL,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
     is_premium BOOLEAN NOT NULL DEFAULT FALSE,
     premium_until TIMESTAMPTZ,
     telegram_payment_charge_id TEXT,
@@ -154,6 +139,15 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_payment_charge_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS interactions (
     id BIGSERIAL PRIMARY KEY,
@@ -192,69 +186,65 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Compatibility migrations for the first version of the bot.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_payment_charge_id TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-CREATE INDEX IF NOT EXISTS users_location_gist_idx
-    ON users USING GIST (location);
 CREATE INDEX IF NOT EXISTS users_matching_idx
     ON users (is_active, gender, target_gender, is_premium);
 CREATE INDEX IF NOT EXISTS interactions_from_to_idx
     ON interactions (from_user, to_user);
 CREATE INDEX IF NOT EXISTS interactions_to_from_idx
     ON interactions (to_user, from_user);
-CREATE INDEX IF NOT EXISTS matches_user_a_idx
-    ON matches (user_a);
-CREATE INDEX IF NOT EXISTS matches_user_b_idx
-    ON matches (user_b);
 """
 
 
-async def pool() -> asyncpg.Pool:
-    if db_pool is None:
-        raise RuntimeError("Database pool is not initialized")
+async def get_pool() -> asyncpg.Pool:
+    global db_pool, db_schema_ready
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL is not configured")
+
+    async with db_lock:
+        if db_pool is None:
+            db_pool = await asyncpg.create_pool(
+                settings.database_url,
+                min_size=1,
+                max_size=8,
+                command_timeout=30,
+                statement_cache_size=0,
+            )
+        if not db_schema_ready:
+            async with db_pool.acquire() as connection:
+                await connection.execute(SCHEMA_SQL)
+            db_schema_ready = True
     return db_pool
 
 
-async def setup_database() -> None:
-    connection_pool = await pool()
-    async with connection_pool.acquire() as connection:
-        await connection.execute(SCHEMA_SQL)
+async def close_pool() -> None:
+    global db_pool, db_schema_ready
+    if db_pool is not None:
+        await db_pool.close()
+    db_pool = None
+    db_schema_ready = False
 
 
 async def startup() -> None:
-    global db_pool
-    db_pool = await asyncpg.create_pool(
-        settings.database_url,
-        min_size=1,
-        max_size=10,
-        command_timeout=30,
-        statement_cache_size=0,
-    )
-    await setup_database()
-    await bot.set_my_commands(
-        [
-            BotCommand(command="browse", description="לראות פרופילים"),
-            BotCommand(command="profile", description="הפרופיל שלי"),
-            BotCommand(command="premium", description="שדרוג לפרימיום"),
-            BotCommand(command="help", description="עזרה"),
-            BotCommand(command="terms", description="תנאי שימוש"),
-            BotCommand(command="support", description="תמיכה"),
-        ]
-    )
-    logger.info("Bot started successfully")
+    # Do not connect to the database here. The bot must start receiving
+    # Telegram updates even when the database credentials need fixing.
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="browse", description="לראות פרופילים"),
+                BotCommand(command="profile", description="הפרופיל שלי"),
+                BotCommand(command="premium", description="שדרוג לפרימיום"),
+                BotCommand(command="help", description="עזרה"),
+                BotCommand(command="terms", description="תנאי שימוש"),
+                BotCommand(command="support", description="תמיכה"),
+            ]
+        )
+    except Exception:
+        logger.exception("Could not update Telegram command menu")
+    logger.info("Telegram polling is starting")
 
 
 async def shutdown() -> None:
-    global db_pool
-    if db_pool is not None:
-        await db_pool.close()
-        db_pool = None
+    await close_pool()
     await bot.session.close()
     logger.info("Bot stopped")
 
@@ -277,7 +267,7 @@ def gender_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def profile_actions(candidate_id: int) -> InlineKeyboardMarkup:
+def profile_keyboard(candidate_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -300,24 +290,60 @@ def profile_actions(candidate_id: int) -> InlineKeyboardMarkup:
     )
 
 
-async def get_user(user_id: int):
-    connection_pool = await pool()
+async def fetch_user(user_id: int):
+    connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
         return await connection.fetchrow(
-            "SELECT * FROM users WHERE telegram_id = $1",
+            """
+            SELECT telegram_id, username, full_name, age, gender,
+                   target_gender, bio, photos, latitude, longitude,
+                   is_premium, premium_until, daily_likes_count,
+                   last_like_reset, is_active
+            FROM users
+            WHERE telegram_id = $1
+            """,
             user_id,
         )
 
 
-async def user_exists(user_id: int) -> bool:
-    return (await get_user(user_id)) is not None
+def premium_is_active(user) -> bool:
+    return bool(
+        user
+        and user["is_premium"]
+        and user["premium_until"]
+        and user["premium_until"] > datetime.now(timezone.utc)
+    )
+
+
+async def send_db_error(message: Message) -> None:
+    logger.exception("Database operation failed")
+    await message.answer(
+        "הבוט פעיל, אבל החיבור למסד הנתונים עדיין לא תקין. "
+        "יש לבדוק את DATABASE_URL ב־Render."
+    )
 
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
+    # Reply before touching the database, so /start always gets a response.
+    await message.answer(
+        "ברוכים הבאים! מתחילים הרשמה.\n"
+        "אפשר לבטל בכל שלב עם /cancel."
+    )
     await state.clear()
-    current_user = await get_user(message.from_user.id)
-    if current_user:
+
+    try:
+        current_user = await fetch_user(message.from_user.id)
+    except Exception:
+        await send_db_error(message)
+        return
+
+    if (
+        current_user
+        and current_user["latitude"] is not None
+        and current_user["longitude"] is not None
+        and current_user["photos"]
+    ):
         await message.answer(
             "הפרופיל שלך כבר קיים. מציג פרופיל חדש:",
             reply_markup=ReplyKeyboardRemove(),
@@ -325,11 +351,7 @@ async def start(message: Message, state: FSMContext) -> None:
         await show_next_profile(message.chat.id)
         return
 
-    await message.answer(
-        "ברוכים הבאים! ניצור לך פרופיל בכמה שלבים.\n"
-        "אפשר לבטל בכל שלב עם /cancel.\n\n"
-        "מה השם המלא שלך?"
-    )
+    await message.answer("מה השם המלא שלך?")
     await state.set_state(Registration.name)
 
 
@@ -348,11 +370,8 @@ async def registration_name(
 ) -> None:
     name = message.text.strip()
     if not 2 <= len(name) <= MAX_NAME_LENGTH:
-        await message.answer(
-            f"נא להזין שם באורך של 2 עד {MAX_NAME_LENGTH} תווים."
-        )
+        await message.answer("נא להזין שם באורך של 2 עד 80 תווים.")
         return
-
     await state.update_data(name=name)
     await message.answer("בן/בת כמה את/ה?")
     await state.set_state(Registration.age)
@@ -366,12 +385,9 @@ async def registration_age(
     if not value.isdigit():
         await message.answer("נא להזין גיל במספרים בלבד.")
         return
-
     age = int(value)
     if age < 18:
-        await message.answer(
-            "סליחה, ההרשמה מיועדת לגיל 18 ומעלה."
-        )
+        await message.answer("השירות מיועד לבני 18 ומעלה.")
         await state.clear()
         return
     if age > 120:
@@ -380,7 +396,7 @@ async def registration_age(
 
     await state.update_data(age=age)
     await message.answer(
-        "שלח את המיקום שלך בלחיצה על הכפתור:",
+        "שלח את המיקום שלך באמצעות הכפתור:",
         reply_markup=location_keyboard(),
     )
     await state.set_state(Registration.location)
@@ -390,21 +406,17 @@ async def registration_age(
 async def registration_location(
     message: Message, state: FSMContext
 ) -> None:
-    location = message.location
     await state.update_data(
-        latitude=location.latitude,
-        longitude=location.longitude,
+        latitude=message.location.latitude,
+        longitude=message.location.longitude,
     )
-    await message.answer(
-        "מה המין שלך?",
-        reply_markup=gender_keyboard(),
-    )
+    await message.answer("מה המין שלך?", reply_markup=gender_keyboard())
     await state.set_state(Registration.gender)
 
 
 @router.message(Registration.location)
 async def invalid_location(message: Message) -> None:
-    await message.answer("נא לשלוח מיקום באמצעות הכפתור 📍.")
+    await message.answer("נא לשלוח מיקום דרך הכפתור 📍.")
 
 
 @router.message(Registration.gender, F.text.in_(["זכר", "נקבה"]))
@@ -412,10 +424,9 @@ async def registration_gender(
     message: Message, state: FSMContext
 ) -> None:
     gender = "male" if message.text == "זכר" else "female"
-    target_gender = "female" if gender == "male" else "male"
     await state.update_data(
         gender=gender,
-        target_gender=target_gender,
+        target_gender="female" if gender == "male" else "male",
     )
     await message.answer(
         "כתוב תיאור קצר על עצמך (עד 500 תווים):",
@@ -435,15 +446,11 @@ async def registration_bio(
 ) -> None:
     bio = message.text.strip()
     if not 1 <= len(bio) <= MAX_BIO_LENGTH:
-        await message.answer(
-            f"נא לכתוב תיאור באורך של עד {MAX_BIO_LENGTH} תווים."
-        )
+        await message.answer("נא לכתוב תיאור באורך של עד 500 תווים.")
         return
-
     await state.update_data(bio=bio, photos=[])
     await message.answer(
-        "שלח בין 1 ל־3 תמונות פרופיל.\n"
-        "כשתסיים, שלח את המילה 'סיימתי'."
+        "שלח 1 עד 3 תמונות. כשתסיים, כתוב 'סיימתי'."
     )
     await state.set_state(Registration.photos)
 
@@ -455,66 +462,44 @@ async def registration_photo(
     data = await state.get_data()
     photos = data.get("photos", [])
     if len(photos) >= MAX_PHOTOS:
-        await message.answer(
-            "אפשר להעלות עד 3 תמונות. שלח 'סיימתי' כדי להמשיך."
-        )
+        await message.answer("אפשר להעלות עד 3 תמונות.")
         return
 
-    try:
-        telegram_photo = message.photo[-1]
-        if all(
-            (
-                settings.cloudinary_cloud_name,
-                settings.cloudinary_api_key,
-                settings.cloudinary_api_secret,
-            )
-        ):
-            telegram_file = await bot.get_file(telegram_photo.file_id)
-            downloaded = await bot.download_file(telegram_file.file_path)
-            uploaded = await asyncio.to_thread(
-                cloudinary.uploader.upload,
-                downloaded.read(),
-                folder="dating-bot/profiles",
-            )
-            photos.append(uploaded["secure_url"])
-        else:
-            # Telegram file IDs are sufficient when Cloudinary is not configured.
-            photos.append(telegram_photo.file_id)
-        await state.update_data(photos=photos)
-        await message.answer(
-            f"התמונה נקלטה ({len(photos)}/{MAX_PHOTOS})."
-        )
-    except Exception:
-        logger.exception("Could not upload profile photo")
-        await message.answer(
-            "לא הצלחתי להעלות את התמונה. נסה שוב."
-        )
+    photos.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await message.answer(
+        f"התמונה נקלטה ({len(photos)}/{MAX_PHOTOS})."
+    )
 
 
-@router.message(Registration.photos, F.text.lower() == "סיימתי")
-async def finish_registration(
+@router.message(Registration.photos, F.text)
+async def finish_photos_or_explain(
     message: Message, state: FSMContext
 ) -> None:
+    text = message.text.strip().casefold()
+    if text not in {"סיימתי", "סיימתי!", "finished", "done"}:
+        await message.answer("שלח תמונה או כתוב 'סיימתי'.")
+        return
+
     data = await state.get_data()
     photos = data.get("photos", [])
     if not photos:
         await message.answer("חובה להעלות לפחות תמונה אחת.")
         return
 
-    connection_pool = await pool()
     try:
+        connection_pool = await get_pool()
         async with connection_pool.acquire() as connection:
             await connection.execute(
                 """
                 INSERT INTO users (
-                    telegram_id, username, full_name, age,
-                    gender, target_gender, bio, photos, location,
-                    updated_at
+                    telegram_id, username, full_name, age, gender,
+                    target_gender, bio, photos, latitude, longitude,
+                    is_active, updated_at
                 )
                 VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8,
-                    ST_SetSRID(ST_MakePoint($9, $10), 4326)::geography,
-                    NOW()
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    TRUE, NOW()
                 )
                 ON CONFLICT (telegram_id) DO UPDATE SET
                     username = EXCLUDED.username,
@@ -524,7 +509,8 @@ async def finish_registration(
                     target_gender = EXCLUDED.target_gender,
                     bio = EXCLUDED.bio,
                     photos = EXCLUDED.photos,
-                    location = EXCLUDED.location,
+                    latitude = EXCLUDED.latitude,
+                    longitude = EXCLUDED.longitude,
                     is_active = TRUE,
                     updated_at = NOW()
                 """,
@@ -536,167 +522,199 @@ async def finish_registration(
                 data["target_gender"],
                 data["bio"],
                 photos,
-                data["longitude"],
                 data["latitude"],
+                data["longitude"],
             )
     except Exception:
-        logger.exception("Could not save profile")
-        await message.answer(
-            "לא הצלחתי לשמור את הפרופיל כרגע. נסה שוב מאוחר יותר."
-        )
+        await send_db_error(message)
         return
 
     await state.clear()
     await message.answer(
-        "הפרופיל נשמר בהצלחה! מציג התאמה ראשונה:",
+        "הפרופיל נשמר בהצלחה! 🎉",
         reply_markup=ReplyKeyboardRemove(),
     )
     await show_next_profile(message.chat.id)
 
 
-@router.message(Registration.photos)
-async def invalid_photo_step(message: Message) -> None:
-    await message.answer("נא לשלוח תמונה או לכתוב 'סיימתי'.")
+def distance_km(
+    first_lat: float,
+    first_lon: float,
+    second_lat: float,
+    second_lon: float,
+) -> float:
+    radius = 6371.0
+    lat1, lat2 = math.radians(first_lat), math.radians(second_lat)
+    delta_lat = math.radians(second_lat - first_lat)
+    delta_lon = math.radians(second_lon - first_lon)
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1)
+        * math.cos(lat2)
+        * math.sin(delta_lon / 2) ** 2
+    )
+    return radius * 2 * math.asin(math.sqrt(value))
 
 
-async def fetch_next_profile(viewer_id: int):
-    connection_pool = await pool()
+async def next_candidate(viewer_id: int):
+    connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
-        return await connection.fetchrow(
+        viewer = await connection.fetchrow(
             """
-            SELECT
-                candidate.telegram_id,
-                candidate.full_name,
-                candidate.username,
-                candidate.age,
-                candidate.bio,
-                candidate.photos,
-                candidate.is_premium,
-                ROUND(
-                    (ST_Distance(candidate.location, viewer.location)
-                    / 1000)::numeric,
-                    1
-                ) AS distance_km,
-                FLOOR(
-                    ST_Distance(candidate.location, viewer.location)
-                    / 1000 / $2
-                ) AS distance_bucket
-            FROM users AS viewer
-            JOIN users AS candidate
-              ON candidate.telegram_id <> viewer.telegram_id
-             AND candidate.gender = viewer.target_gender
-             AND candidate.target_gender = viewer.gender
-             AND candidate.is_active = TRUE
-             AND candidate.location IS NOT NULL
-             AND cardinality(candidate.photos) > 0
-            WHERE viewer.telegram_id = $1
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM interactions AS i
-                  WHERE i.from_user = viewer.telegram_id
-                    AND i.to_user = candidate.telegram_id
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM blocked_users AS b
-                  WHERE (
-                      b.blocker_id = viewer.telegram_id
-                      AND b.blocked_id = candidate.telegram_id
-                  )
-                  OR (
-                      b.blocker_id = candidate.telegram_id
-                      AND b.blocked_id = viewer.telegram_id
-                  )
-              )
-            ORDER BY distance_bucket ASC,
-                     candidate.is_premium DESC,
-                     distance_km ASC
-            LIMIT 1
+            SELECT telegram_id, gender, target_gender, latitude, longitude,
+                   is_premium, premium_until
+            FROM users
+            WHERE telegram_id = $1 AND is_active = TRUE
             """,
             viewer_id,
-            DISTANCE_BUCKET_KM,
         )
+        if viewer is None:
+            return None
+
+        candidates = await connection.fetch(
+            """
+            SELECT c.telegram_id, c.username, c.full_name, c.age, c.bio,
+                   c.photos, c.latitude, c.longitude, c.is_premium,
+                   c.premium_until
+            FROM users AS c
+            WHERE c.telegram_id <> $1
+              AND c.gender = $2
+              AND c.target_gender = $3
+              AND c.is_active = TRUE
+              AND c.latitude IS NOT NULL
+              AND c.longitude IS NOT NULL
+              AND cardinality(c.photos) > 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM interactions AS i
+                  WHERE i.from_user = $1 AND i.to_user = c.telegram_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM blocked_users AS b
+                  WHERE (b.blocker_id = $1 AND b.blocked_id = c.telegram_id)
+                     OR (b.blocker_id = c.telegram_id AND b.blocked_id = $1)
+              )
+            LIMIT 250
+            """,
+            viewer_id,
+            viewer["target_gender"],
+            viewer["gender"],
+        )
+
+    enriched = []
+    for candidate in candidates:
+        distance = distance_km(
+            viewer["latitude"],
+            viewer["longitude"],
+            candidate["latitude"],
+            candidate["longitude"],
+        )
+        bucket = int(distance // DISTANCE_BUCKET_KM)
+        enriched.append(
+            (
+                bucket,
+                not premium_is_active(candidate),
+                distance,
+                candidate,
+            )
+        )
+    if not enriched:
+        return None
+    enriched.sort(key=lambda item: (item[0], item[1], item[2]))
+    return enriched[0][3], enriched[0][2]
 
 
 async def show_next_profile(chat_id: int) -> None:
-    candidate = await fetch_next_profile(chat_id)
-    if candidate is None:
+    try:
+        result = await next_candidate(chat_id)
+    except Exception:
+        logger.exception("Could not find next candidate")
         await bot.send_message(
             chat_id,
-            "אין כרגע פרופילים חדשים שמתאימים לך. נסה שוב מאוחר יותר.",
+            "לא הצלחתי לטעון פרופילים כרגע. בדוק את חיבור מסד הנתונים.",
         )
         return
 
-    premium = " 🌟" if candidate["is_premium"] else ""
-    bio = candidate["bio"] or "ללא תיאור"
-    photo_count = len(candidate["photos"])
+    if not result:
+        await bot.send_message(
+            chat_id,
+            "אין כרגע פרופילים חדשים שמתאימים לך.",
+        )
+        return
+
+    candidate, distance = result
+    premium = " 🌟" if premium_is_active(candidate) else ""
     caption = (
         f"{candidate['full_name']}, {candidate['age']}{premium}\n\n"
-        f"{bio}\n\n"
-        f"מרחק: {candidate['distance_km']} ק״מ"
-        f"\nתמונות בפרופיל: {photo_count}"
+        f"{candidate['bio'] or 'ללא תיאור'}\n\n"
+        f"מרחק: {distance:.1f} ק״מ"
     )
     await bot.send_photo(
-        chat_id=chat_id,
-        photo=candidate["photos"][0],
+        chat_id,
+        candidate["photos"][0],
         caption=caption,
-        reply_markup=profile_actions(candidate["telegram_id"]),
+        reply_markup=profile_keyboard(candidate["telegram_id"]),
     )
 
 
 @router.message(Command("browse"))
 async def browse(message: Message) -> None:
-    if not await user_exists(message.from_user.id):
+    try:
+        user = await fetch_user(message.from_user.id)
+    except Exception:
+        await send_db_error(message)
+        return
+    if user is None:
         await message.answer("קודם צריך להשלים הרשמה עם /start.")
         return
     await show_next_profile(message.chat.id)
 
 
 @router.message(Command("profile"))
-async def my_profile(message: Message) -> None:
-    user = await get_user(message.from_user.id)
+async def profile(message: Message) -> None:
+    try:
+        user = await fetch_user(message.from_user.id)
+    except Exception:
+        await send_db_error(message)
+        return
     if user is None:
         await message.answer("עדיין אין לך פרופיל. התחל עם /start.")
         return
 
-    premium = "פעיל 🌟" if is_premium_active(user) else "לא פעיל"
+    status = (
+        f"פעיל עד {user['premium_until'].strftime('%d/%m/%Y')} 🌟"
+        if premium_is_active(user)
+        else "לא פעיל"
+    )
     await message.answer(
         f"הפרופיל שלך:\n"
         f"שם: {user['full_name']}\n"
         f"גיל: {user['age']}\n"
-        f"פרימיום: {premium}\n\n"
+        f"Premium: {status}\n\n"
         f"{user['bio']}"
     )
 
 
-def is_premium_active(user) -> bool:
-    if not user["is_premium"]:
-        return False
-    if user["premium_until"] is None:
-        return False
-    return user["premium_until"] > datetime.now(timezone.utc)
-
-
 async def register_action(
-    from_user: int, to_user: int, action: str
-) -> dict:
-    if from_user == to_user:
-        return {"status": "invalid"}
+    from_user: int,
+    to_user: int,
+    action: str,
+) -> str:
+    if from_user == to_user or action not in {"yes", "no"}:
+        return "invalid"
 
-    connection_pool = await pool()
+    connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
         async with connection.transaction():
-            already_seen = await connection.fetchval(
+            exists = await connection.fetchval(
                 """
-                SELECT 1
-                FROM interactions
+                SELECT 1 FROM interactions
                 WHERE from_user = $1 AND to_user = $2
                 """,
                 from_user,
                 to_user,
             )
-            if already_seen:
-                return {"status": "duplicate"}
+            if exists:
+                return "duplicate"
 
             viewer = await connection.fetchrow(
                 """
@@ -709,21 +727,17 @@ async def register_action(
                 from_user,
             )
             if viewer is None:
-                return {"status": "missing_user"}
+                return "missing_user"
 
             if action == "yes":
-                premium = is_premium_active(viewer)
-                reset_needed = (
+                reset = (
                     viewer["last_like_reset"] is None
                     or viewer["last_like_reset"].date()
                     < datetime.now(timezone.utc).date()
                 )
-                current_count = (
-                    0 if reset_needed else viewer["daily_likes_count"]
-                )
-                if not premium and current_count >= FREE_DAILY_LIKES:
-                    return {"status": "limit"}
-
+                count = 0 if reset else viewer["daily_likes_count"]
+                if not premium_is_active(viewer) and count >= FREE_DAILY_LIKES:
+                    return "limit"
                 await connection.execute(
                     """
                     UPDATE users
@@ -733,7 +747,7 @@ async def register_action(
                     WHERE telegram_id = $1
                     """,
                     from_user,
-                    current_count if premium else current_count + 1,
+                    count if premium_is_active(viewer) else count + 1,
                 )
 
             await connection.execute(
@@ -747,12 +761,11 @@ async def register_action(
             )
 
             if action != "yes":
-                return {"status": "saved"}
+                return "saved"
 
             reciprocal = await connection.fetchval(
                 """
-                SELECT 1
-                FROM interactions
+                SELECT 1 FROM interactions
                 WHERE from_user = $1
                   AND to_user = $2
                   AND action = 'yes'
@@ -761,25 +774,27 @@ async def register_action(
                 from_user,
             )
             if not reciprocal:
-                return {"status": "saved"}
+                return "saved"
 
             user_a, user_b = sorted((from_user, to_user))
             await connection.execute(
                 """
                 INSERT INTO matches (user_a, user_b)
                 VALUES ($1, $2)
-                ON CONFLICT (user_a, user_b) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 user_a,
                 user_b,
             )
-            return {"status": "match"}
+            return "match"
 
 
-def telegram_link(user_id: int, username: Optional[str]) -> str:
-    if username:
-        return f"https://t.me/{username}"
-    return f"tg://user?id={user_id}"
+def user_link(user_id: int, username: Optional[str]) -> str:
+    return (
+        f"https://t.me/{username}"
+        if username
+        else f"tg://user?id={user_id}"
+    )
 
 
 @router.callback_query(F.data.startswith("profile:"))
@@ -792,7 +807,7 @@ async def profile_action(callback: CallbackQuery) -> None:
         return
 
     if action == "block":
-        connection_pool = await pool()
+        connection_pool = await get_pool()
         async with connection_pool.acquire() as connection:
             await connection.execute(
                 """
@@ -803,50 +818,50 @@ async def profile_action(callback: CallbackQuery) -> None:
                 callback.from_user.id,
                 target_id,
             )
-        result = {"status": "saved"}
+        result = "saved"
         await callback.answer("המשתמש נחסם.")
-    elif action in ("yes", "no"):
-        result = await register_action(
-            callback.from_user.id,
-            target_id,
-            action,
-        )
-        if result["status"] == "limit":
+    else:
+        try:
+            result = await register_action(
+                callback.from_user.id,
+                target_id,
+                action,
+            )
+        except Exception:
+            logger.exception("Could not save profile action")
             await callback.answer(
-                "הגעת למגבלת 10 סימוני 'כן' היום. "
-                "אפשר לשדרג לפרימיום.",
+                "שגיאה בשמירת הפעולה. נסה שוב.",
                 show_alert=True,
             )
             return
-        if result["status"] == "duplicate":
-            await callback.answer("הפעולה הזו כבר נשמרה.")
-        else:
-            await callback.answer("נשמר.")
-    else:
-        await callback.answer("פעולה לא מוכרת.", show_alert=True)
-        return
+
+        if result == "limit":
+            await callback.answer(
+                "הגעת למגבלת 10 סימוני 'כן' להיום.",
+                show_alert=True,
+            )
+            return
+        await callback.answer("נשמר.")
 
     if callback.message:
         try:
             await callback.message.delete()
         except Exception:
-            logger.debug("Could not delete old profile message")
+            logger.debug("Could not delete profile message")
 
-    if result["status"] == "match":
-        current = await get_user(callback.from_user.id)
-        target = await get_user(target_id)
+    if result == "match":
+        current = await fetch_user(callback.from_user.id)
+        target = await fetch_user(target_id)
         if current and target:
             await bot.send_message(
                 callback.from_user.id,
                 "יש לכם Match! 🎉\n"
-                f"פרטי Telegram: "
-                f"{telegram_link(target_id, target['username'])}",
+                f"{user_link(target_id, target['username'])}",
             )
             await bot.send_message(
                 target_id,
                 "יש לכם Match! 🎉\n"
-                f"פרטי Telegram: "
-                f"{telegram_link(callback.from_user.id, current['username'])}",
+                f"{user_link(callback.from_user.id, current['username'])}",
             )
 
     await show_next_profile(callback.from_user.id)
@@ -854,28 +869,28 @@ async def profile_action(callback: CallbackQuery) -> None:
 
 @router.message(Command("premium"))
 async def premium(message: Message) -> None:
-    current = await get_user(message.from_user.id)
-    if current is None:
+    try:
+        user = await fetch_user(message.from_user.id)
+    except Exception:
+        await send_db_error(message)
+        return
+    if user is None:
         await message.answer("קודם צריך להשלים הרשמה עם /start.")
         return
-    if is_premium_active(current):
-        until = current["premium_until"].strftime("%d/%m/%Y")
-        await message.answer(f"הפרימיום שלך פעיל עד {until} 🌟")
+    if premium_is_active(user):
+        await message.answer("מנוי ה־Premium שלך כבר פעיל.")
         return
 
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="פרופיל פרימיום 🌟",
-        description=(
-            "לייקים ללא הגבלה, קדימות בתור וחשיפה טובה יותר "
-            "למשתמשים אחרים."
-        ),
+        title="פרופיל Premium 🌟",
+        description="לייקים ללא הגבלה וקדימות בתור.",
         payload=PREMIUM_PAYLOAD,
         provider_token="",
         currency="XTR",
         prices=[
             LabeledPrice(
-                label="פרימיום לחודש — יעד מחיר 15 ש״ח",
+                label="Premium לחודש — יעד 15 ש״ח",
                 amount=settings.premium_price_stars,
             )
         ],
@@ -893,7 +908,7 @@ async def pre_checkout(query: PreCheckoutQuery) -> None:
         await bot.answer_pre_checkout_query(
             query.id,
             ok=False,
-            error_message="פרטי התשלום אינם תואמים למוצר.",
+            error_message="פרטי התשלום אינם תואמים.",
         )
         return
     await bot.answer_pre_checkout_query(query.id, ok=True)
@@ -904,13 +919,6 @@ async def successful_payment(message: Message) -> None:
     payment = message.successful_payment
     if payment is None or payment.invoice_payload != PREMIUM_PAYLOAD:
         return
-    if (
-        payment.currency != "XTR"
-        or payment.total_amount != settings.premium_price_stars
-    ):
-        logger.error("Unexpected payment amount from Telegram")
-        return
-
     expiration_timestamp = getattr(
         payment,
         "subscription_expiration_date",
@@ -925,9 +933,9 @@ async def successful_payment(message: Message) -> None:
         else datetime.now(timezone.utc) + timedelta(days=PREMIUM_DAYS)
     )
 
-    connection_pool = await pool()
-    async with connection_pool.acquire() as connection:
-        async with connection.transaction():
+    try:
+        connection_pool = await get_pool()
+        async with connection_pool.acquire() as connection:
             await connection.execute(
                 """
                 INSERT INTO payments (
@@ -936,7 +944,7 @@ async def successful_payment(message: Message) -> None:
                     provider_payment_charge_id, premium_until
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (telegram_payment_charge_id) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 message.from_user.id,
                 payment.invoice_payload,
@@ -959,21 +967,22 @@ async def successful_payment(message: Message) -> None:
                 premium_until,
                 payment.telegram_payment_charge_id,
             )
+    except Exception:
+        await send_db_error(message)
+        return
 
     await message.answer(
-        "התשלום התקבל והפרופיל שודרג לפרימיום 🌟\n"
-        f"בתוקף עד {premium_until.strftime('%d/%m/%Y')}."
+        "התשלום התקבל. הפרופיל שודרג ל־Premium 🌟"
     )
 
 
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "פקודות זמינות:\n"
-        "/start — הרשמה או התחלה\n"
-        "/browse — הצגת פרופילים\n"
-        "/profile — הצגת הפרופיל שלך\n"
-        "/premium — שדרוג לפרימיום\n"
+        "/start — הרשמה\n"
+        "/browse — פרופילים\n"
+        "/profile — הפרופיל שלי\n"
+        "/premium — שדרוג Premium\n"
         "/cancel — ביטול הרשמה"
     )
 
@@ -981,12 +990,8 @@ async def help_command(message: Message) -> None:
 @router.message(Command("terms"))
 async def terms_command(message: Message) -> None:
     await message.answer(
-        "תנאי שימוש בקצרה:\n"
-        "השירות מיועד לבני 18 ומעלה בלבד. אין להעלות תוכן פוגעני, "
-        "מטעה או בלתי חוקי. ניתן לחסום משתמשים מתוך פרופיל. "
-        "רכישות Premium מתבצעות באמצעות Telegram Stars.\n\n"
-        "לפני פרסום מסחרי, יש להוסיף כאן את תנאי השימוש המלאים "
-        "ואת מדיניות הפרטיות של השירות."
+        "השירות מיועד לבני 18 ומעלה. אין להעלות תוכן פוגעני או בלתי חוקי. "
+        "רכישות Premium מתבצעות באמצעות Telegram Stars."
     )
 
 
@@ -994,12 +999,15 @@ async def terms_command(message: Message) -> None:
 async def support_command(message: Message) -> None:
     if settings.support_username:
         await message.answer(
-            f"לשירות ותמיכה: https://t.me/{settings.support_username.lstrip('@')}"
+            f"תמיכה: https://t.me/{settings.support_username.lstrip('@')}"
         )
     else:
-        await message.answer(
-            "שירות התמיכה עדיין לא הוגדר. יש להגדיר SUPPORT_USERNAME."
-        )
+        await message.answer("ערוץ התמיכה עדיין לא הוגדר.")
+
+
+@router.message()
+async def fallback(message: Message) -> None:
+    await message.answer("שלח /start כדי להתחיל.")
 
 
 async def main() -> None:
