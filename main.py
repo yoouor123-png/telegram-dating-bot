@@ -24,6 +24,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from legal_privacy import coarse_distance_text
 
 
 logging.basicConfig(
@@ -109,6 +110,8 @@ settings = Settings.from_env()
 bot = Bot(token=settings.bot_token)
 dp = Dispatcher()
 router = Router()
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 db_pool: Optional[asyncpg.Pool] = None
 db_schema_ready = False
@@ -125,6 +128,7 @@ DISTANCE_BUCKET_KM = 5
 
 
 class Registration(StatesGroup):
+    consent = State()
     name = State()
     age = State()
     location = State()
@@ -223,6 +227,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TR
 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+CREATE TABLE IF NOT EXISTS policy_acceptances (
+    telegram_id BIGINT NOT NULL,
+    terms_version TEXT NOT NULL,
+    privacy_version TEXT NOT NULL,
+    accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (telegram_id, terms_version, privacy_version)
+);
+
 CREATE TABLE IF NOT EXISTS interactions (
     id BIGSERIAL PRIMARY KEY,
     from_user BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -311,7 +323,15 @@ async def startup() -> None:
                 BotCommand(command="cancelpremium", description="ביטול חידוש פרימיום"),
                 BotCommand(command="paysupport", description="עזרה בתשלום"),
                 BotCommand(command="help", description="עזרה"),
+                BotCommand(command="legal", description="מרכז מידע משפטי ופרטיות"),
+                BotCommand(command="privacy", description="מדיניות פרטיות"),
                 BotCommand(command="terms", description="תנאי שימוש"),
+                BotCommand(command="refunds", description="ביטולים והחזרים"),
+                BotCommand(command="safety", description="בטיחות ודיווח"),
+                BotCommand(command="mydata", description="ייצוא המידע שלי"),
+                BotCommand(command="pause", description="השהיית הפרופיל"),
+                BotCommand(command="resume", description="הפעלת הפרופיל מחדש"),
+                BotCommand(command="deleteaccount", description="מחיקת חשבון"),
                 BotCommand(command="support", description="תמיכה"),
                 BotCommand(
                     command="support_identity",
@@ -369,7 +389,11 @@ def profile_keyboard(candidate_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🚫 חסום",
                     callback_data=f"profile:block:{candidate_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="דיווח לתמיכה",
+                    callback_data=f"legal:report:{candidate_id}",
+                ),
             ],
         ]
     )
@@ -408,19 +432,59 @@ async def send_db_error(message: Message) -> None:
     )
 
 
+async def require_current_consent(
+    user_id: int,
+    target,
+    state: FSMContext,
+    existing_profile: bool = True,
+) -> bool:
+    from legal_privacy import (
+        CURRENT_PRIVACY_VERSION,
+        CURRENT_TERMS_VERSION,
+        consent_keyboard,
+        consent_text,
+        has_current_acceptance,
+    )
+    accepted = await has_current_acceptance(await get_pool(), user_id)
+    if accepted:
+        return True
+    await state.clear()
+    await state.update_data(
+        pending_existing_profile=existing_profile,
+        terms_version=CURRENT_TERMS_VERSION,
+        privacy_version=CURRENT_PRIVACY_VERSION,
+    )
+    await state.set_state(Registration.consent)
+    await target.answer(consent_text(), reply_markup=consent_keyboard())
+    return False
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
-    # Reply before touching the database, so /start always gets a response.
-    await message.answer(
-        "ברוכים הבאים! מתחילים הרשמה.\n"
-        "אפשר לבטל בכל שלב עם /cancel."
-    )
     await state.clear()
 
     try:
         current_user = await fetch_user(message.from_user.id)
     except Exception:
         await send_db_error(message)
+        return
+
+    try:
+        accepted = await require_current_consent(
+            message.from_user.id,
+            message,
+            state,
+            existing_profile=bool(
+                current_user
+                and current_user["latitude"] is not None
+                and current_user["longitude"] is not None
+                and current_user["photos"]
+            ),
+        )
+    except Exception:
+        await send_db_error(message)
+        return
+    if not accepted:
         return
 
     if (
@@ -436,8 +500,57 @@ async def start(message: Message, state: FSMContext) -> None:
         await show_next_profile(message.chat.id)
         return
 
-    await message.answer("מה השם המלא שלך?")
+    await message.answer(
+        "ברוכים הבאים! מתחילים הרשמה.\nאפשר לבטל בכל שלב עם /cancel."
+    )
+    await message.answer("מה שם התצוגה שלך? אין צורך בשם מלא.")
     await state.set_state(Registration.name)
+
+
+@router.callback_query(
+    Registration.consent,
+    F.data.in_({"legal:consent:accept", "legal:consent:decline"}),
+)
+async def registration_consent(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.message or callback.message.chat.type != "private":
+        await callback.answer("ההרשמה זמינה בשיחה פרטית בלבד.", show_alert=True)
+        return
+    if callback.data == "legal:consent:decline":
+        await state.clear()
+        await callback.answer()
+        await callback.message.answer(
+            "לא נרשמה הסכמה ולכן לא נפתח או הוצג פרופיל. "
+            "אפשר לעיין ב־/legal או לפנות ב־/support."
+        )
+        return
+    from legal_privacy import record_current_acceptance
+    data = await state.get_data()
+    try:
+        await record_current_acceptance(
+            await get_pool(),
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.full_name,
+        )
+    except Exception:
+        logger.exception("Could not record policy acceptance")
+        await callback.answer("ההסכמה לא נשמרה. נסה שוב.", show_alert=True)
+        return
+    await callback.answer("ההסכמה נשמרה.")
+    if data.get("pending_existing_profile"):
+        await state.clear()
+        await callback.message.answer("אפשר להמשיך להשתמש בפרופיל הקיים.")
+        await show_next_profile(callback.from_user.id)
+        return
+    await callback.message.answer("מה שם התצוגה שלך? אין צורך בשם מלא.")
+    await state.set_state(Registration.name)
+
+
+@router.message(Registration.consent)
+async def registration_consent_text(message: Message) -> None:
+    await message.answer(
+        "יש לבחור בכפתור הסכמה מפורשת כדי להמשיך, או לעיין ב־/legal."
+    )
 
 
 @router.message(Command("cancel"))
@@ -573,6 +686,15 @@ async def finish_photos_or_explain(
         return
 
     try:
+        from legal_privacy import has_current_acceptance
+        if not await has_current_acceptance(
+            await get_pool(), message.from_user.id
+        ):
+            await state.clear()
+            await message.answer(
+                "גרסת ההסכמה הנוכחית חסרה. הנתונים לא נשמרו; התחל שוב עם /start."
+            )
+            return
         connection_pool = await get_pool()
         async with connection_pool.acquire() as connection:
             await connection.execute(
@@ -731,7 +853,7 @@ async def show_next_profile(chat_id: int) -> None:
     caption = (
         f"{candidate['full_name']}, {candidate['age']}{premium}\n\n"
         f"{candidate['bio'] or 'ללא תיאור'}\n\n"
-        f"מרחק: {distance:.1f} ק״מ"
+        f"מרחק משוער: {coarse_distance_text(distance)}"
     )
     await bot.send_photo(
         chat_id,
@@ -742,7 +864,7 @@ async def show_next_profile(chat_id: int) -> None:
 
 
 @router.message(Command("browse"))
-async def browse(message: Message) -> None:
+async def browse(message: Message, state: FSMContext) -> None:
     try:
         user = await fetch_user(message.from_user.id)
     except Exception:
@@ -750,6 +872,14 @@ async def browse(message: Message) -> None:
         return
     if user is None:
         await message.answer("קודם צריך להשלים הרשמה עם /start.")
+        return
+    try:
+        if not await require_current_consent(
+            message.from_user.id, message, state, existing_profile=True
+        ):
+            return
+    except Exception:
+        await send_db_error(message)
         return
     await show_next_profile(message.chat.id)
 
@@ -790,6 +920,17 @@ async def register_action(
     connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
         async with connection.transaction():
+            blocked = await connection.fetchval(
+                """
+                SELECT 1 FROM blocked_users
+                WHERE (blocker_id=$1 AND blocked_id=$2)
+                   OR (blocker_id=$2 AND blocked_id=$1)
+                """,
+                from_user,
+                to_user,
+            )
+            if blocked:
+                return "blocked"
             exists = await connection.fetchval(
                 """
                 SELECT 1 FROM interactions
@@ -812,6 +953,12 @@ async def register_action(
                 from_user,
             )
             if viewer is None:
+                return "missing_user"
+            target_active = await connection.fetchval(
+                "SELECT is_active FROM users WHERE telegram_id=$1",
+                to_user,
+            )
+            if not target_active:
                 return "missing_user"
 
             if action == "yes":
@@ -964,12 +1111,28 @@ async def matches_command(message: Message) -> None:
 
 
 @router.callback_query(F.data.startswith("profile:"))
-async def profile_action(callback: CallbackQuery) -> None:
+async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         _, action, target_text = callback.data.split(":")
         target_id = int(target_text)
     except (AttributeError, ValueError):
         await callback.answer("פעולה לא תקינה.", show_alert=True)
+        return
+    try:
+        if not await require_current_consent(
+            callback.from_user.id,
+            callback.message,
+            state,
+            existing_profile=True,
+        ):
+            await callback.answer(
+                "נדרשת הסכמה לגרסה הנוכחית לפני פעולה בפרופיל.",
+                show_alert=True,
+            )
+            return
+    except Exception:
+        logger.exception("Could not check policy acceptance")
+        await callback.answer("לא ניתן לבדוק הסכמה כרגע.", show_alert=True)
         return
 
     if action == "block":
@@ -1139,15 +1302,12 @@ async def help_command(message: Message) -> None:
         "/profile — הפרופיל שלי\n"
         "/matches — המאצ׳ים שלי\n"
         "/premium — שדרוג Premium\n"
+        "/pause — השהיית הפרופיל; /resume — הפעלה מחדש\n"
+        "/legal — פרטיות, תנאים, החזרים ובטיחות\n"
+        "/mydata — ייצוא המידע שלי\n"
+        "/deleteaccount — מחיקת החשבון\n"
+        "/support — תמיכה בתוך הבוט\n"
         "/cancel — ביטול הרשמה"
-    )
-
-
-@router.message(Command("terms"))
-async def terms_command(message: Message) -> None:
-    await message.answer(
-        "השירות מיועד לבני 18 ומעלה. אין להעלות תוכן פוגעני או בלתי חוקי. "
-        "רכישות Premium מתבצעות באמצעות Telegram Stars."
     )
 
 
@@ -1177,6 +1337,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
     register_premium(
@@ -1187,8 +1348,9 @@ if __name__ == "__main__":
         dp,
         bot,
         get_pool,
-        settings.support_username,
+        "",  # Support is intentionally available inside the bot only.
         settings.support_owner_telegram_id,
     )
+    register_legal(dp, bot, get_pool)
     dp.include_router(router)
     asyncio.run(main())

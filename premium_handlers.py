@@ -40,10 +40,19 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
                 "• קדימות בין פרופילים באותו טווח מרחק\n\n"
                 "מנוי מתחדש אוטומטית בכל 30 ימים. ניתן לבטל את החידוש.\n"
                 "עלות רכישת Stars בשקלים נקבעת על ידי Telegram.\n"
-                "הפרימיום יופעל רק לאחר תשלום מוצלח.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="רכישת Premium", callback_data="premium:buy")
-                ]]),
+                "הפרימיום יופעל רק לאחר תשלום מוצלח.\n\n"
+                "מסמכי המדיניות הם טיוטה חלקית: פרטי המפעיל/כתובת ובדיקה משפטית "
+                "עדיין חסרים. יש לעיין בתנאים, בפרטיות ובהחזרים לפני רכישה.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="רכישת Premium", callback_data="premium:buy")],
+                    [InlineKeyboardButton(
+                        text="תנאי שימוש", callback_data="legal:terms"),
+                     InlineKeyboardButton(
+                        text="פרטיות", callback_data="legal:privacy")],
+                    [InlineKeyboardButton(
+                        text="ביטולים והחזרים", callback_data="legal:refunds")],
+                ]),
             )
         except Exception:
             log.exception("Premium screen failed")
