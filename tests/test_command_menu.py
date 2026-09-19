@@ -5,10 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from command_menu import ADMIN_COMMANDS, configure_command_menu
+from command_menu import ADMIN_COMMANDS, PUBLIC_COMMANDS, configure_command_menu
 
 
 class CommandMenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_profile_reset_replaces_edit_and_account_deletion_stays_distinct(self):
+        commands = dict(PUBLIC_COMMANDS)
+        self.assertIn("resetprofile", commands)
+        self.assertNotIn("editprofile", commands)
+        self.assertEqual(commands["deleteaccount"], "מחיקת חשבון")
+        self.assertIn("מחדש", commands["resetprofile"])
+
     async def test_owner_gets_private_menu_without_exposing_public_admin_commands(self):
         bot = SimpleNamespace(set_my_commands=AsyncMock())
         await configure_command_menu(bot, 123)

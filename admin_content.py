@@ -61,10 +61,12 @@ async def show_notices(message, pool, user_id):
     if user and user["moderation_reason"]:
         await message.answer(reason_message(user["moderation_reason"]))
     if user and user["admin_hold"]:
-        await message.answer("פרסום הפרופיל חסום על ידי מנהל. אפשר לתקן עם /editprofile; לערעור: /support.")
-    for text in await notices(pool, user_id):
+        await message.answer("הפרסום חסום בידי מנהל. לערעור: /support.")
+    recent = await notices(pool, user_id)
+    for text in recent:
         await message.answer(text, parse_mode=None)
-    await message.answer("היסטוריית סיבות מלאה, בדפים: /contentnotices (או /contentnotices 2 וכן הלאה).")
+    if recent:
+        await message.answer("כל ההודעות: /contentnotices")
 
 
 async def apply_action(pool, user_id, revision, action, reason, actor_id):
@@ -148,11 +150,9 @@ async def apply_action(pool, user_id, revision, action, reason, actor_id):
                 )
             notice = (
                 f"עדכון מנהל: {description}\nסיבה: {reason}\n"
-                "לתיקון תוכן שהוסר או הוסתר: /editprofile. "
-                "לערעור על חסימת מנהל: /support. "
-                "אין אפשרות לעקוף חסימת מנהל באמצעות /start או /resume. "
-                "תוכן מתוקן או משוחזר חייב לעבור בדיקה אוטומטית לפני פרסום. "
-                "המנוי והיסטוריית התשלום לא שונו."
+                "התחלה מחדש: /resetprofile | ערעור: /support.\n"
+                "התחלה מחדש אינה מסירה חסימת מנהל. תוכן חדש או משוחזר דורש בדיקה. "
+                "הפרימיום והתשלומים נשמרים."
             )
             return await c.fetchval(
                 """INSERT INTO content_events

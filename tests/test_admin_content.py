@@ -53,7 +53,7 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 review_tests.response('{"allowed":false,"reason_code":"' + code + '"}'))
             self.assertEqual(verdict, "rejected")
             self.assertEqual(verdict.reason, code)
-            self.assertIn("/editprofile", moderation.reason_message(code))
+            self.assertIn("/resetprofile", moderation.reason_message(code))
         self.assertEqual(moderation.parse_verdict(review_tests.response(
             '{"allowed":false,"reason_code":"secret arbitrary output"}')), "unavailable")
         self.assertEqual(moderation.parse_verdict(review_tests.response(
@@ -187,7 +187,7 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         event = message(1)
         await admin.show_notices(event, self.pool, 1)
         text = "\n".join(call.args[0] for call in event.answer.call_args_list)
-        for item in ("Specific explicit reason", "/support", "/editprofile"):
+        for item in ("Specific explicit reason", "/support", "/resetprofile"):
             self.assertIn(item, text)
         self.assertEqual(await self.pool.fetchval(
             "SELECT delivery FROM content_events WHERE id=$1", event_id), "uncertain")
@@ -254,4 +254,4 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.pool.fetchval(
             "SELECT reason FROM submission_rejections WHERE telegram_id=44"), "offensive")
         await admin.show_notices(event, self.pool, 44)
-        self.assertIn("/editprofile", "\n".join(c.args[0] for c in event.answer.call_args_list))
+        self.assertIn("/resetprofile", "\n".join(c.args[0] for c in event.answer.call_args_list))

@@ -61,7 +61,7 @@ class Verdict(str):
 
 def reason_message(reason):
     return ("התוכן לא אושר לפרסום. " + REASONS.get(reason, REASONS["other"])
-            + "\nשלח תוכן מתוקן בשלב ההרשמה הנוכחי; לתיקון פרופיל קיים: /editprofile.")
+            + "\nבהרשמה: שלח תוכן אחר. לפרופיל חדש במקום הקיים: /resetprofile.")
 
 
 async def _post(session, endpoint, payload):

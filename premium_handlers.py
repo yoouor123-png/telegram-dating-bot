@@ -20,7 +20,7 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
 
     async def show(message):
         if message.chat.type != "private":
-            await message.answer("רכישת פרימיום זמינה בשיחה פרטית בלבד.")
+            await message.answer("Premium זמין בשיחה פרטית בלבד.")
             return
         try:
             user = await fetch_user(message.from_user.id)
@@ -30,14 +30,14 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
             active = (f"הפרימיום שלך פעיל עד {user['premium_until']:%d/%m/%Y %H:%M} UTC.\n"
                       if is_active(user) else "")
             await message.answer(
-                active + f"Premium — {price} Stars בתשלום חד־פעמי ל־30 ימים.\n"
-                "• לייקים ללא הגבלה\n• קדימות בין פרופילים באותו טווח מרחק\n\n"
-                "אין חידוש או חיוב אוטומטי. רכישה נוספת מוסיפה 30 ימים לתוקף הקיים.\n"
-                "בסיום התקופה תישלח הודעה עם אפשרות לחידוש ידני.\n"
-                "עלות Stars בשקלים נקבעת על ידי Telegram. הפרימיום מופעל לאחר תשלום מוצלח.\n"
+                active + f"Premium — {price} Stars ל־30 ימים, בתשלום חד־פעמי.\n"
+                "• לייקים ללא הגבלה • קדימות בטווח המרחק\n"
+                "אין חידוש או חיוב אוטומטי. רכישה נוספת מוסיפה 30 ימים.\n"
+                "בסיום תישלח הודעה לחידוש ידני. המחיר בשקלים נקבע ב־Telegram.\n"
+                "הפרימיום מופעל רק לאחר תשלום מוצלח.\n"
                 + await service.legacy_status(message.from_user.id) +
-                "\n\nמסמכי המדיניות הם טיוטה חלקית: פרטי המפעיל/כתובת ובדיקה משפטית "
-                "עדיין חסרים. יש לעיין בתנאים, בפרטיות ובהחזרים לפני רכישה.",
+                "\n\nהמסמכים הם טיוטה חלקית. פרטי מפעיל/כתובת ובדיקה משפטית חסרים. "
+                "יש לעיין בתנאים, בפרטיות ובהחזרים לפני רכישה.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="רכישת Premium", callback_data="premium:buy")],
                     [InlineKeyboardButton(text="תנאי שימוש", callback_data="legal:terms"),
@@ -46,7 +46,7 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
                 ]))
         except Exception as error:
             log.warning("Premium screen failed (%s)", type(error).__name__)
-            await message.answer("לא ניתן לטעון את הפרימיום כרגע. נסה /premium.")
+            await message.answer("לא ניתן לטעון Premium כרגע. נסה שוב.")
 
     router.message.register(show, Command("premium"))
     router.message.register(show, F.text.in_({"פרימיום", "Premium", "premium"}))
@@ -67,12 +67,12 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
                 payload=payload(callback.from_user.id), provider_token="", currency="XTR",
                 prices=[LabeledPrice(label="Premium", amount=price)])
             await callback.message.answer(
-                f"תשלום חד־פעמי של {price} Stars ל־30 ימים. אין חידוש אוטומטי.",
+                f"{price} Stars ל־30 ימים, חד־פעמי וללא חידוש אוטומטי.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text="פתיחת התשלום ב־Telegram", url=link)]]))
         except Exception as error:
             log.warning("Premium invoice failed (%s)", type(error).__name__)
-            await callback.message.answer("לא ניתן לפתוח תשלום כרגע. נסה /premium.")
+            await callback.message.answer("לא ניתן לפתוח תשלום כרגע. נסה שוב.")
 
     @router.pre_checkout_query()
     async def checkout(query):
@@ -100,10 +100,9 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
         except Exception as error:
             log.warning("Paid entitlement requires reconciliation (%s)", type(error).__name__)
             await message.answer(
-                "התשלום התקבל ב־Telegram אך שמירת הפרימיום נכשלה. אל תשלם שוב. "
-                "שמור את קבלת Telegram ופנה ל־/paysupport.")
+                "התשלום התקבל אך שמירת Premium נכשלה. אל תשלם שוב; שמור קבלה ופנה ל־/paysupport.")
             return
-        await message.answer("התשלום נשמר והפרימיום עודכן. לצפייה בתוקף: /premium")
+        await message.answer("התשלום נשמר ו־Premium עודכן. תוקף: /premium")
 
     @router.message(Command("cancelpremium"))
     async def cancel(message):
@@ -119,6 +118,6 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
     async def old_cancel(callback):
         await callback.answer()
         if callback.message and callback.message.chat.type == "private":
-            await callback.message.answer("למצב ביטול החידוש של מנויים ישנים: /cancelpremium")
+            await callback.message.answer("לביטול חידוש ישן: /cancelpremium")
 
     return service

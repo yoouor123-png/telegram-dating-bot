@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 from legal_privacy import coarse_distance_text
 from moderation import moderate, report_failure, review_existing, register_moderation
+from profile_reset import new_reset_token
 
 
 logging.basicConfig(
@@ -133,6 +134,10 @@ class Registration(StatesGroup):
     gender = State()
     bio = State()
     photos = State()
+
+
+class ProfileReset(StatesGroup):
+    confirming = State()
 
 
 SCHEMA_SQL = """
@@ -462,10 +467,7 @@ def premium_is_active(user) -> bool:
 
 async def send_db_error(message: Message) -> None:
     logger.error("Database operation failed")
-    await message.answer(
-        "הבוט פעיל, אבל החיבור למסד הנתונים עדיין לא תקין. "
-        "יש לבדוק את DATABASE_URL ב־Render."
-    )
+    await message.answer("שגיאת מסד נתונים. נסה שוב מאוחר יותר.")
 
 
 async def require_current_consent(
@@ -473,6 +475,7 @@ async def require_current_consent(
     target,
     state: FSMContext,
     existing_profile: bool = True,
+    fresh_after_reset: bool = False,
 ) -> bool:
     from legal_privacy import (
         CURRENT_PRIVACY_VERSION,
@@ -487,6 +490,7 @@ async def require_current_consent(
     await state.clear()
     await state.update_data(
         pending_existing_profile=existing_profile,
+        fresh_after_reset=fresh_after_reset,
         terms_version=CURRENT_TERMS_VERSION,
         privacy_version=CURRENT_PRIVACY_VERSION,
     )
@@ -550,13 +554,117 @@ async def ensure_review(message, user_id: int) -> bool:
     if verdict == "approved":
         return True
     if verdict == "missing":
-        await message.answer("הפרופיל אינו שלם. יש להשלים שם, תיאור, תמונות ומיקום עם /editprofile.")
+        await message.answer("הפרופיל אינו שלם. לפתיחת פרופיל חדש: /resetprofile.")
     else:
         await report_failure(message, verdict)
     return False
 
 
-@router.message(Command("editprofile"))
+def reset_keyboard(revision: int, token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="מחיקה והתחלה מחדש",
+            callback_data=f"reset:confirm:{revision}:{token}",
+        ),
+        InlineKeyboardButton(
+            text="ביטול",
+            callback_data=f"reset:cancel:{revision}:{token}",
+        ),
+    ]])
+
+
+async def prompt_profile_reset(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        current_user = await fetch_user(message.from_user.id)
+    except Exception:
+        await send_db_error(message)
+        return
+    revision = current_user["moderation_revision"] if current_user else -1
+    token = new_reset_token()
+    await state.update_data(reset_revision=revision, reset_token=token)
+    await state.set_state(ProfileReset.confirming)
+    await message.answer(
+        "יימחקו הפרופיל, המאצ׳ים והפעולות שלך.\n"
+        "Premium ותשלומים יישמרו.\n"
+        "חסימות והגבלות בטיחות יישארו בתוקף.",
+        reply_markup=reset_keyboard(revision, token),
+    )
+
+
+@router.message(Command("resetprofile", "editprofile"))
+async def resetprofile_command(message: Message, state: FSMContext) -> None:
+    await prompt_profile_reset(message, state)
+
+
+@router.callback_query(F.data.startswith("reset:"))
+async def resetprofile_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.message or callback.message.chat.type != "private":
+        await callback.answer("הפעולה זמינה בשיחה פרטית בלבד.", show_alert=True)
+        return
+    try:
+        _, action, revision_text, token = callback.data.split(":", 3)
+        revision = int(revision_text)
+    except (AttributeError, TypeError, ValueError):
+        await callback.answer("האישור אינו תקין.", show_alert=True)
+        return
+    data = await state.get_data()
+    current_state = await state.get_state()
+    if (
+        current_state != ProfileReset.confirming.state
+        or data.get("reset_revision") != revision
+        or data.get("reset_token") != token
+    ):
+        await callback.answer("האישור כבר אינו בתוקף.", show_alert=True)
+        return
+    if action == "cancel":
+        await state.clear()
+        await callback.answer("הפעולה בוטלה.")
+        await callback.message.answer("הפרופיל נשאר ללא שינוי.")
+        return
+    if action != "confirm":
+        await callback.answer("האישור אינו תקין.", show_alert=True)
+        return
+
+    from profile_reset import reset_profile
+    try:
+        result = await reset_profile(
+            await get_pool(), callback.from_user.id, revision
+        )
+    except Exception:
+        logger.exception("Could not reset profile")
+        await callback.answer("הפרופיל לא אופס. נסה שוב.", show_alert=True)
+        return
+    if result == "stale":
+        await state.clear()
+        await callback.answer("הפרופיל השתנה; יש לבקש איפוס חדש.", show_alert=True)
+        return
+
+    await callback.answer("הפרופיל אופס.")
+    await state.clear()
+    await state.update_data(fresh_after_reset=True)
+    try:
+        accepted = await require_current_consent(
+            callback.from_user.id,
+            callback.message,
+            state,
+            existing_profile=False,
+            fresh_after_reset=True,
+        )
+    except Exception:
+        await send_db_error(callback.message)
+        return
+    if accepted:
+        await begin_registration(
+            callback.message, state, callback.from_user.id
+        )
+
+
+@router.message(CommandStart(), StateFilter(ProfileReset))
+async def start_during_profile_reset(message: Message) -> None:
+    await message.answer("יש לאשר או לבטל את פתיחת הפרופיל החדש בכפתורים.")
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -569,19 +677,27 @@ async def start(message: Message, state: FSMContext) -> None:
         await send_db_error(message)
         return
 
+    profile_complete = bool(
+        current_user
+        and current_user["latitude"] is not None
+        and current_user["longitude"] is not None
+        and current_user["photos"]
+        and current_user["moderation_status"] != "rejected"
+        and current_user["full_name"].strip() not in {"", "נמחק"}
+        and current_user["bio"].strip()
+    )
+    if current_user and not profile_complete:
+        await message.answer(
+            "הפרופיל הקיים אינו שלם או נדחה. לפתיחת פרופיל חדש: /resetprofile."
+        )
+        return
+
     try:
         accepted = await require_current_consent(
             message.from_user.id,
             message,
             state,
-            existing_profile=bool(
-                current_user
-                and current_user["latitude"] is not None
-                and current_user["longitude"] is not None
-                and current_user["photos"]
-                and current_user["moderation_status"] != "rejected"
-                and not message.text.startswith("/editprofile")
-            ),
+            existing_profile=profile_complete,
         )
     except Exception:
         await send_db_error(message)
@@ -589,23 +705,15 @@ async def start(message: Message, state: FSMContext) -> None:
     if not accepted:
         return
 
-    if (
-        current_user
-        and current_user["latitude"] is not None
-        and current_user["longitude"] is not None
-        and current_user["photos"]
-        and current_user["moderation_status"] != "rejected"
-        and not message.text.startswith("/editprofile")
-    ):
+    if profile_complete:
         if not await ensure_review(message, message.from_user.id):
             return
         await message.answer(
-            "הפרופיל שלך כבר קיים. מציג פרופיל חדש:",
+            "הפרופיל שלך כבר קיים.",
             reply_markup=ReplyKeyboardRemove(),
         )
         await show_next_profile(message.chat.id)
         return
-
     await begin_registration(message, state, message.from_user.id)
 
 
@@ -646,14 +754,9 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
         await callback.message.answer("אפשר להמשיך להשתמש בפרופיל הקיים.")
         await show_next_profile(callback.from_user.id)
         return
+    fresh_after_reset = bool(data.get("fresh_after_reset"))
+    await state.update_data(fresh_after_reset=fresh_after_reset)
     await begin_registration(callback.message, state, callback.from_user.id)
-
-
-@router.message(Registration.consent)
-async def registration_consent_text(message: Message) -> None:
-    await message.answer(
-        "יש לבחור בכפתור הסכמה מפורשת כדי להמשיך, או לעיין ב־/legal."
-    )
 
 
 @router.message(Command("cancel"))
@@ -665,12 +768,14 @@ async def cancel(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(Registration.consent)
+async def registration_consent_text(message: Message) -> None:
+    await message.answer("בחר בכפתור ההסכמה, או פתח /legal.")
+
+
 @router.message(StateFilter(Registration), F.document | F.video | F.animation | F.sticker | F.audio | F.voice)
 async def refuse_registration_files(message: Message) -> None:
-    await message.answer(
-        "הקובץ לא התקבל ולא נשמר בפרופיל. מסמכים, סרטונים ואנימציות אינם נתמכים. "
-        "יש לשלוח טקסט בשלב הטקסט, או תמונה רגילה בשלב התמונות."
-    )
+    await message.answer("הקובץ לא נשמר. שלח טקסט או תמונה רגילה לפי השלב.")
 
 
 @router.message(Registration.name, F.text)
@@ -813,7 +918,7 @@ async def finish_photos_or_explain(
         ):
             await state.clear()
             await message.answer(
-                "גרסת ההסכמה הנוכחית חסרה. הנתונים לא נשמרו; התחל שוב עם /start."
+                "ההסכמה חסרה והנתונים לא נשמרו. פתח /start."
             )
             return
         connection_pool = await get_pool()
@@ -840,7 +945,14 @@ async def finish_photos_or_explain(
                     latitude = EXCLUDED.latitude,
                     longitude = EXCLUDED.longitude,
                     moderation_status = 'approved',
-                    moderation_reason = NULL,
+                    moderation_reason = CASE
+                        WHEN users.admin_hold THEN users.moderation_reason
+                        ELSE NULL
+                    END,
+                    is_active = CASE
+                        WHEN $12 THEN NOT users.admin_hold
+                        ELSE users.is_active
+                    END,
                     moderation_revision = users.moderation_revision + 1,
                     updated_at = NOW()
                 WHERE users.moderation_revision = $11
@@ -857,6 +969,7 @@ async def finish_photos_or_explain(
                 data["latitude"],
                 data["longitude"],
                 data.get("profile_revision", -1),
+                bool(data.get("fresh_after_reset")),
             )
     except Exception:
         await send_db_error(message)
@@ -868,7 +981,7 @@ async def finish_photos_or_explain(
         return
     await state.clear()
     await message.answer(
-        "הפרופיל עבר בדיקה ונשמר! 🎉 אם הושהה בעבר, להפעלה: /resume.",
+        "הפרופיל אושר ונשמר.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await show_next_profile(message.chat.id)
@@ -878,10 +991,7 @@ async def finish_photos_or_explain(
 @router.message(Registration.bio, F.document | F.video | F.animation | F.sticker)
 @router.message(Registration.photos)
 async def unsupported_registration_media(message: Message) -> None:
-    await message.answer(
-        "המדיה לא התקבלה ולא נשמרה בפרופיל. יש לשלוח טקסט בשלב הטקסט "
-        "או תמונה רגילה בשלב התמונות, לא מסמכים, סרטונים או אנימציות."
-    )
+    await message.answer("המדיה לא נשמרה. שלח טקסט או תמונה רגילה לפי השלב.")
 
 
 def distance_km(
@@ -981,7 +1091,7 @@ async def show_next_profile(chat_id: int) -> None:
         logger.exception("Could not find next candidate")
         await bot.send_message(
             chat_id,
-            "לא הצלחתי לטעון פרופילים כרגע. בדוק את חיבור מסד הנתונים.",
+            "לא ניתן לטעון פרופילים כרגע. נסה שוב.",
         )
         return
 
@@ -1058,14 +1168,18 @@ async def profile(message: Message) -> None:
         if premium_is_active(user)
         else "לא פעיל"
     )
+    review_status = {
+        "approved": "מאושר",
+        "rejected": "נדחה",
+        "unreviewed": "ממתין לבדיקה",
+    }.get(user["moderation_status"], "לא ידוע")
     await message.answer(
-        f"הפרופיל שלך:\n"
         f"שם: {user['full_name']}\n"
         f"גיל: {user['age']}\n"
-        f"בדיקת תוכן: {user['moderation_status']} (unreviewed = טרם אושר)\n"
+        f"בדיקה: {review_status}\n"
         f"תצוגה: {'פעילה' if visible_profile(user) else 'מוסתרת'}\n"
-        f"Premium: {status}\n\n"
-        f"{user['bio']}"
+        f"Premium: {status}\n"
+        f"תיאור: {user['bio']}"
     )
 
 
@@ -1245,9 +1359,7 @@ async def send_match_contact(chat_id: int, target) -> None:
             await bot.send_message(
                 chat_id,
                 f"יש לכם Match! 🎉\n{target['full_name']}\n"
-                "לא ניתן היה לשלוח את כפתור הפרופיל. "
-                "אפשר להגדיר שם משתמש ציבורי בהגדרות Telegram "
-                "ולנסות שוב באמצעות /matches.",
+                "כפתור הפרופיל לא נשלח. אפשר להגדיר שם משתמש ולפתוח /matches.",
             )
         except Exception:
             logger.warning("Could not deliver match notification to %s", chat_id)
@@ -1359,7 +1471,7 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
 
         if result == "limit":
             await callback.answer(
-                "ניצלת את 10 הלייקים להיום. המכסה מתחדשת בחצות לפי שעון ישראל.",
+                "ניצלת את 10 הלייקים להיום. המכסה מתחדשת בחצות.",
                 show_alert=True,
             )
             return
@@ -1388,7 +1500,7 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
 async def help_command(message: Message) -> None:
     await message.answer(
         "/start — הרשמה\n"
-        "/editprofile — תיקון הפרופיל ובדיקה אוטומטית חדשה\n"
+        "/resetprofile — מחיקת הפרופיל ופתיחת הרשמה חדשה\n"
         "/browse — פרופילים\n"
         "/profile — הפרופיל שלי\n"
         "/matches — המאצ׳ים שלי\n"

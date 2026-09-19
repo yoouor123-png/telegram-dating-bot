@@ -8,11 +8,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 log = logging.getLogger("dating-bot.premium")
 PERIOD = timedelta(days=30)
-EXPIRY_TEXT = "הפרימיום שלך הסתיים. אם תרצה לחדש, לחץ על הכפתור למטה. אין חידוש או חיוב אוטומטי."
+EXPIRY_TEXT = "Premium הסתיים. לחידוש ידני, לחץ על הכפתור. אין חידוש או חיוב אוטומטי."
 LEGACY_PENDING_TEXT = (
-    "ביטול החידוש של תשלומים ישנים עדיין לא אושר; חלקם עשויים להיות "
-    "תשלומים חד־פעמיים. הבוט מנסה לבטל שוב. בדוק גם בהגדרות "
-    "Telegram ← הכוכבים שלי ← מינויים. הזמן שכבר שולם נשמר."
+    "ביטול חידוש ישן עדיין לא אושר; ייתכן שמדובר בתשלום חד־פעמי. "
+    "הבוט ינסה שוב. בדוק גם Telegram ← הכוכבים שלי ← מינויים. הזמן ששולם נשמר."
 )
 
 
@@ -218,4 +217,4 @@ class PremiumService:
                WHERE telegram_id=$1 AND status<>'canceled'""", uid)
         if pending:
             return LEGACY_PENDING_TEXT
-        return "אין חידוש אוטומטי ברכישות החדשות. ביטול כל חידוש ישן שאותר אושר; הזמן שכבר שולם נשמר."
+        return "רכישות חדשות אינן מתחדשות אוטומטית. חידושים ישנים שאותרו בוטלו; הזמן ששולם נשמר."

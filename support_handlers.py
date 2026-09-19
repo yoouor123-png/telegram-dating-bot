@@ -242,7 +242,7 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
 
     async def open_support(message, state, payment=False):
         if message.chat.type != "private":
-            await message.answer("לתמיכה יש לפנות בשיחה פרטית עם הבוט.")
+            await message.answer("תמיכה זמינה בשיחה פרטית בלבד.")
             return
         rows = [[InlineKeyboardButton(
             text="פתיחת פנייה בנושא תשלום" if payment else "פתיחת פנייה לתמיכה",
@@ -253,28 +253,22 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
                 text="שיחה עם התמיכה", url=f"https://t.me/{username}")])
         text = (
             "עזרה בתשלום\n"
-            "• בדיקת תוקף הפרימיום: /premium\n"
-            "• רכישות חדשות אינן מתחדשות אוטומטית.\n"
-            "• בדיקת ביטול חידוש של מנוי ישן: /cancelpremium\n"
-            "• חויבת ולא קיבלת פרימיום? אל תשלם שוב. פתח פנייה ושמור את הקבלה.\n"
-            "• לבקשת החזר: פתח פנייה עם תאריך התשלום וסכום ה־Stars. "
-            "הפתיחה אינה מבצעת החזר אוטומטי."
+            "• תוקף Premium: /premium\n"
+            "• רכישות חדשות ללא חידוש אוטומטי; חידוש ישן: /cancelpremium\n"
+            "• חויבת בלי Premium? אל תשלם שוב. פתח פנייה ושמור קבלה.\n"
+            "• להחזר: פתח פנייה עם תאריך וסכום Stars; הפנייה אינה החזר אוטומטי."
             if payment else
             "תמיכה\n"
-            "• צפייה בפרופילים: /browse\n"
-            "• המאצ׳ים שלך: /matches\n"
-            "• הפרופיל שלך: /profile\n"
-            "• פרימיום: /premium\n"
-            "• עזרה בתשלום: /paysupport"
+            "• פרופילים: /browse | מאצ׳ים: /matches | פרופיל: /profile\n"
+            "• Premium: /premium | עזרה בתשלום: /paysupport"
         )
         text += "\n\n@LoviraBot — אימייל לפניות: Lovirabot@gmail.com"
         if owner_id is None:
             text += (
-                "\n\nמפעיל תיבת הפניות טרם הוגדר, ולכן פניות קיימות וחדשות "
-                "נשמרות בלבד ולא ייענו מתוך הבוט. אין כרגע זמן מענה מובטח."
+                "\n\nתיבת הפניות טרם הוגדרה: הפניות נשמרות בלבד. אין זמן מענה מובטח."
             )
         elif not username:
-            text += "\n\nאפשר לשמור פנייה לצוות התמיכה; אין זמן מענה מובטח."
+            text += "\n\nאפשר לשמור פנייה; אין זמן מענה מובטח."
         await message.answer(
             text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
         )
@@ -293,7 +287,7 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
     @router.message(Command("support_identity"))
     async def identity(message):
         if message.chat.type != "private" or message.from_user is None:
-            await message.answer("הפקודה זמינה בשיחה פרטית עם הבוט בלבד.")
+            await message.answer("הפקודה זמינה בשיחה פרטית בלבד.")
             return
         await message.answer(
             f"מזהה Telegram שלך הוא: {message.from_user.id}\n"
@@ -312,20 +306,20 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
         await callback.answer()
         if await state.get_state() not in (None, Support.details.state):
             await callback.message.answer(
-                "יש לסיים את ההרשמה או לבטל אותה עם /cancel לפני פתיחת פנייה.")
+                "סיים את ההרשמה או בטל עם /cancel לפני פתיחת פנייה.")
             return
         await state.set_state(Support.details)
         await state.update_data(support_category=callback.data.split(":")[1])
         await callback.message.answer(
-            "כתוב את פרטי הבעיה בהודעת טקסט אחת (עד 2,000 תווים).\n"
-            "אל תשלח סיסמאות או פרטי כרטיס אשראי. לביטול: /cancel")
+            "כתוב את הבעיה בטקסט אחד (עד 2,000 תווים).\n"
+            "אין לשלוח סיסמאות או פרטי כרטיס. לביטול: /cancel")
 
     @router.message(Support.details, Command("cancel"))
     async def cancel(message, state):
         if message.chat.type != "private" or message.from_user is None:
             return
         await state.clear()
-        await message.answer("פתיחת הפנייה בוטלה.")
+        await message.answer("הפנייה בוטלה.")
 
     @router.message(Support.details, F.text, ~F.text.startswith("/"))
     async def save(message, state):
@@ -355,23 +349,22 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
                     )
         except Exception:
             log.exception("Could not save support ticket")
-            await message.answer("הפנייה לא נשמרה. נסה לשלוח שוב או בטל עם /cancel.")
+            await message.answer("הפנייה לא נשמרה. נסה שוב או בטל עם /cancel.")
             return
         await state.clear()
         stored_only = owner_id is None
         await message.answer(
-            f"הפנייה נשמרה במספר {ticket_id}. "
-            "שמירת הפנייה אינה מבצעת ביטול מנוי או החזר כספי.\n"
+            f"הפנייה #{ticket_id} נשמרה. שמירתה אינה מבטלת מנוי או מבצעת החזר.\n"
             + (
-                "מפעיל תיבת הפניות טרם הוגדר; הפנייה נשמרה בלבד ולא תיענה מתוך הבוט."
+                "תיבת הפניות טרם הוגדרה; הפנייה נשמרה בלבד."
                 if stored_only else
-                "צוות התמיכה יוכל לבדוק אותה; אין זמן מענה מובטח."
+                "צוות התמיכה יבדוק אותה; אין זמן מענה מובטח."
             ))
 
     @router.message(Support.details, ~F.text, ~F.successful_payment)
     async def text_only(message):
         if message.chat.type == "private" and message.from_user is not None:
-            await message.answer("נא לתאר את הבעיה בטקסט, או לשלוח /cancel לביטול.")
+            await message.answer("נא לתאר את הבעיה בטקסט, או /cancel לביטול.")
 
     async def show_inbox(target, page):
         page = max(0, page)

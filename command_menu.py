@@ -4,13 +4,13 @@ from aiogram.types import BotCommand, BotCommandScopeChat
 PUBLIC_COMMANDS = [
     ("browse", "לראות פרופילים"),
     ("profile", "הפרופיל שלי"),
-    ("editprofile", "תיקון הפרופיל"),
+    ("resetprofile", "מחיקת הפרופיל והתחלה מחדש"),
     ("matches", "המאצ׳ים שלי"),
     ("premium", "שדרוג לפרימיום"),
-    ("cancelpremium", "בדיקת ביטול חידוש של מנוי ישן"),
+    ("cancelpremium", "מצב ביטול חידוש מנוי ישן"),
     ("paysupport", "עזרה בתשלום"),
     ("help", "עזרה"),
-    ("legal", "מרכז מידע משפטי ופרטיות"),
+    ("legal", "מידע משפטי ופרטיות"),
     ("privacy", "מדיניות פרטיות"),
     ("terms", "תנאי שימוש"),
     ("refunds", "ביטולים והחזרים"),
@@ -19,9 +19,9 @@ PUBLIC_COMMANDS = [
     ("pause", "השהיית הפרופיל"),
     ("resume", "הפעלת הפרופיל מחדש"),
     ("deleteaccount", "מחיקת חשבון"),
-    ("contentnotices", "הסברים על פעולות בתוכן שלי"),
+    ("contentnotices", "הודעות על הפרופיל"),
     ("support", "תמיכה"),
-    ("support_identity", "הצגת מזהה Telegram שלי"),
+    ("support_identity", "המזהה שלי בטלגרם"),
 ]
 ADMIN_COMMANDS = [
     ("admin", "ניהול פרופילים ותוכן"),

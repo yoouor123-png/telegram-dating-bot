@@ -43,6 +43,14 @@ relationship/support data, but it is not full anonymization: the identifying
 Telegram user key and minimal payment records remain for reconciliation. A
 final payment-retention period still requires legal review.
 
+`/resetprofile` replaces profile editing. It requires confirmation before clearing
+the profile and its matches/interactions, then starts fresh registration. Paid
+Premium, payment records, safety blocks/reports, support history and administrator
+holds remain. The new profile must pass the usual consent and content checks
+before publication. `/editprofile` is a compatibility alias for the confirmation
+prompt, not an editing shortcut. `/deleteaccount` remains a separate account
+deletion flow.
+
 ## Support operator setup on Render
 
 The configured operator can send `/stats` in a private chat for live aggregate
@@ -117,10 +125,10 @@ Actions: suspend/release publication, take down the entire profile (hide through
 an independent administrator hold, not account deletion), remove a photo/name/bio,
 or hide individual items. Hidden items have separate restore buttons and retain
 only their necessary value (photo file ID and position, or text). Other owner
-actions preserve hidden items; beginning user edits or deleting the account
+actions preserve hidden items; confirming profile reset or deleting the account
 invalidates them. Restoring content sets `unreviewed`; `/start` runs automatic
 review before any publication. Releasing a hold neither approves content nor
-reactivates a user-paused account. `/resume`, `/start`, edits and automatic approval
+reactivates a user-paused account. `/resume`, `/start`, profile resets and automatic approval
 cannot clear an owner hold. Incomplete content cannot publish.
 
 The mutation, minimal actor/reason/time audit and notification are committed
@@ -128,7 +136,7 @@ together. Telegram notification is best effort, claimed once, and never blindly
 retried: `sending` after interruption and `uncertain` mean delivery is unknown.
 The owner sees delivery status in the profile's recent audit. Users see durable
 reasons/remediation on `/start` and `/profile`; `/contentnotices [page]` provides
-older history (five entries per page). `/editprofile` corrects content; `/support`
+older history (five entries per page). `/resetprofile` starts a new profile after confirmation; `/support`
 appeals owner holds. Paid entitlement and payment history are not reset.
 Account deletion clears private action content and hidden items, retaining paid
 accounting data as described in the policy.
@@ -174,7 +182,7 @@ The additive migration deliberately marks **all existing profiles unreviewed**
 and hidden. There is no background bulk scan or automatic transmission of old
 profiles. Existing users must accept the new policy and use `/start` or `/browse`
 to check and publish their profile. Consent is checked before transmission.
-Denied profiles can be corrected with `/start` or `/editprofile`; Premium
+Denied saved profiles can be deleted and rebuilt with `/resetprofile`; Premium
 entitlements remain intact. Approval does not reactivate a paused profile.
 `/resume`, old action buttons, discovery, matches and match notifications require
 approval. Billing, support, export and deletion remain available.
