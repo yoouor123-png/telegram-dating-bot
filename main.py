@@ -282,6 +282,33 @@ CREATE INDEX IF NOT EXISTS interactions_from_to_idx
     ON interactions (from_user, to_user);
 CREATE INDEX IF NOT EXISTS interactions_to_from_idx
     ON interactions (to_user, from_user);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_hold BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_reason TEXT;
+CREATE TABLE IF NOT EXISTS submission_rejections (
+    telegram_id BIGINT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK(reason IN ('sexual','revealing','offensive','violence','other'))
+);
+CREATE TABLE IF NOT EXISTS content_events (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    actor_id BIGINT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL,
+    notice TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivery TEXT NOT NULL DEFAULT 'pending'
+      CHECK (delivery IN ('pending','sending','sent','uncertain')),
+    revision INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hidden_content (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
+    position INTEGER
+);
+CREATE OR REPLACE FUNCTION content_complete(u users) RETURNS BOOLEAN
+LANGUAGE SQL IMMUTABLE AS $$
+    SELECT NOT u.admin_hold AND btrim(u.full_name) NOT IN ('', 'נמחק')
+        AND btrim(u.bio) <> '' AND cardinality(u.photos)>0
+        AND u.latitude IS NOT NULL AND u.longitude IS NOT NULL
+$$;
 """
 
 
@@ -411,7 +438,8 @@ async def fetch_user(user_id: int):
             SELECT telegram_id, username, full_name, age, gender,
                    target_gender, bio, photos, latitude, longitude,
                    is_premium, premium_until, daily_likes_count,
-                   last_like_reset, is_active, moderation_status, moderation_revision
+                   last_like_reset, is_active, moderation_status, moderation_revision,
+                   admin_hold, moderation_reason
             FROM users
             WHERE telegram_id = $1
             """,
@@ -467,11 +495,13 @@ async def begin_registration(target, state: FSMContext, user_id: int) -> None:
     # Invalidate old reviews immediately, without touching paid entitlement.
     connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
-        revision = await connection.fetchval(
-            """UPDATE users SET moderation_status='unreviewed',
-               moderation_revision=moderation_revision+1, updated_at=NOW()
-               WHERE telegram_id=$1 RETURNING moderation_revision""", user_id,
-        )
+        async with connection.transaction():
+            revision = await connection.fetchval(
+                """UPDATE users SET moderation_status='unreviewed',
+                   moderation_revision=moderation_revision+1, updated_at=NOW()
+                   WHERE telegram_id=$1 RETURNING moderation_revision""", user_id,
+            )
+            await connection.execute("DELETE FROM hidden_content WHERE telegram_id=$1", user_id)
     await state.update_data(profile_revision=revision if revision is not None else -1)
     await target.answer(
         "לפני פרסום, השם, התיאור וכל תמונה נשלחים ל־OpenAI לבדיקה אוטומטית. "
@@ -495,6 +525,14 @@ async def check_submission(message, **content) -> bool:
         return False
     verdict = await moderate(bot, **content)
     if verdict != "approved":
+        if verdict == "rejected":
+            pool = await get_pool()
+            async with pool.acquire() as connection:
+                await connection.execute(
+                    """INSERT INTO submission_rejections VALUES ($1,$2)
+                       ON CONFLICT (telegram_id) DO UPDATE SET reason=EXCLUDED.reason""",
+                    message.from_user.id, getattr(verdict, "reason", "other"),
+                )
         await report_failure(message, verdict, delete=True)
         return False
     return True
@@ -507,11 +545,8 @@ async def ensure_review(message, user_id: int) -> bool:
         verdict = "unavailable"
     if verdict == "approved":
         return True
-    if verdict == "rejected":
-        await message.answer(
-            "הפרופיל לא אושר ואינו מוצג. לתיקון: /start או /editprofile. "
-            "המנוי בתשלום לא נמחק."
-        )
+    if verdict == "missing":
+        await message.answer("הפרופיל אינו שלם. יש להשלים שם, תיאור, תמונות ומיקום עם /editprofile.")
     else:
         await report_failure(message, verdict)
     return False
@@ -524,6 +559,8 @@ async def start(message: Message, state: FSMContext) -> None:
 
     try:
         current_user = await fetch_user(message.from_user.id)
+        from admin_content import show_notices
+        await show_notices(message, await get_pool(), message.from_user.id)
     except Exception:
         await send_db_error(message)
         return
@@ -799,6 +836,7 @@ async def finish_photos_or_explain(
                     latitude = EXCLUDED.latitude,
                     longitude = EXCLUDED.longitude,
                     moderation_status = 'approved',
+                    moderation_reason = NULL,
                     moderation_revision = users.moderation_revision + 1,
                     updated_at = NOW()
                 WHERE users.moderation_revision = $11
@@ -871,6 +909,7 @@ async def next_candidate(viewer_id: int):
             FROM users
             WHERE telegram_id = $1 AND is_active = TRUE
               AND moderation_status = 'approved'
+              AND content_complete(users)
             """,
             viewer_id,
         )
@@ -888,6 +927,7 @@ async def next_candidate(viewer_id: int):
               AND c.target_gender = $3
               AND c.is_active = TRUE
               AND c.moderation_status = 'approved'
+              AND content_complete(c)
               AND c.latitude IS NOT NULL
               AND c.longitude IS NOT NULL
               AND cardinality(c.photos) > 0
@@ -1000,6 +1040,8 @@ async def browse(message: Message, state: FSMContext) -> None:
 async def profile(message: Message) -> None:
     try:
         user = await fetch_user(message.from_user.id)
+        from admin_content import show_notices
+        await show_notices(message, await get_pool(), message.from_user.id)
     except Exception:
         await send_db_error(message)
         return
@@ -1034,6 +1076,11 @@ async def register_action(
     connection_pool = await get_pool()
     async with connection_pool.acquire() as connection:
         async with connection.transaction():
+            # Lock both parties in deterministic order against concurrent admin actions.
+            await connection.fetch(
+                """SELECT telegram_id FROM users WHERE telegram_id=ANY($1::bigint[])
+                   ORDER BY telegram_id FOR UPDATE""", sorted([from_user, to_user]),
+            )
             blocked = await connection.fetchval(
                 """
                 SELECT 1 FROM blocked_users
@@ -1063,6 +1110,7 @@ async def register_action(
                 FROM users
                 WHERE telegram_id = $1 AND is_active = TRUE
                   AND moderation_status = 'approved'
+                  AND content_complete(users)
                 FOR UPDATE
                 """,
                 from_user,
@@ -1071,7 +1119,7 @@ async def register_action(
                 return "missing_user"
             target_active = await connection.fetchval(
                 """SELECT is_active FROM users WHERE telegram_id=$1
-                   AND moderation_status='approved'""",
+                   AND moderation_status='approved' AND content_complete(users)""",
                 to_user,
             )
             if not target_active:
@@ -1138,7 +1186,11 @@ async def register_action(
 
 
 def visible_profile(user) -> bool:
-    return bool(user and user["is_active"] and user["moderation_status"] == "approved")
+    return bool(user and user["is_active"] and user["moderation_status"] == "approved"
+                and not user.get("admin_hold", False)
+                and user.get("full_name", "").strip() not in ("", "נמחק")
+                and user.get("bio", "").strip() and user.get("photos")
+                and user.get("latitude") is not None and user.get("longitude") is not None)
 
 
 def user_link(user_id: int, username: Optional[str]) -> str:
@@ -1214,10 +1266,12 @@ async def matches_command(message: Message) -> None:
                 WHERE (m.user_a = $1 OR m.user_b = $1)
                   AND u.is_active = TRUE
                   AND u.moderation_status = 'approved'
+                  AND content_complete(u)
                   AND EXISTS (
                       SELECT 1 FROM users AS viewer
                       WHERE viewer.telegram_id=$1 AND viewer.is_active=TRUE
                         AND viewer.moderation_status='approved'
+                        AND content_complete(viewer)
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM blocked_users AS b
@@ -1476,10 +1530,12 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    from admin_content import register_admin_content
     from admin_stats import register_admin_stats
     from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
+    register_admin_content(dp, bot, get_pool, settings.support_owner_telegram_id)
     register_moderation(dp, settings.support_owner_telegram_id)
     register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)
     register_premium(

@@ -17,7 +17,7 @@ import test_support as support_tests
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def response(text='{"allowed":true}', status="completed"):
+def response(text='{"allowed":true,"reason_code":"none"}', status="completed"):
     return {
         "status": status,
         "output": [{"type": "message", "status": "completed",
@@ -77,7 +77,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_second_layer_denial(self):
         with patch.object(moderation, "_post", new_callable=AsyncMock) as post:
             post.side_effect = [{"results": [{"flagged": False}]},
-                                response('{"allowed":false}')]
+                                response('{"allowed":false,"reason_code":"sexual"}')]
             self.assertEqual(await moderation.moderate(self.bot, bio="test"), "rejected")
 
     async def test_missing_key_and_known_suspicion_never_transmitted(self):
@@ -109,6 +109,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     def test_strict_result_refusal_truncation_and_malformed(self):
         bad = [
             response('{"allowed":"true"}'), response('{"allowed":1}'),
+            response('{"allowed":true}'), response('{"allowed":false}'),
             response('{"allowed":true,"extra":false}'),
             response('{"allowed":false,"allowed":true}'),
             response('[["allowed",true]]'), response('{"allowed":{"nested":true}}'),

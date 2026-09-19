@@ -93,7 +93,55 @@ create another polling worker, or assume that a configured key proves model
 access. Missing credentials, network/provider errors, refusal, incomplete or
 malformed responses all fail closed: new/unreviewed content is not published.
 The optional operator-only private `/moderation` command reports configuration,
-not live readiness. There is no manual approval or rejected-media forwarding.
+not live readiness. There is no manual approval bypass. The private owner dashboard
+can inspect saved profiles, including unreviewed/rejected profiles; rejected
+registration submissions are not stored as profile content.
+
+### Owner content moderation
+
+Set `SUPPORT_OWNER_TELEGRAM_ID` to the operator's Telegram user ID. Use `/admin`
+in a private chat. Pages include pending, rejected, paused and held profiles.
+Open a profile to see every saved photo, name/bio and status. Every mutation
+requires a typed reason and an explicit confirmation; revised/deleted profiles
+invalidate old controls. Owner media uses Telegram content protection (not a
+guarantee against screenshots).
+
+Actions: suspend/release publication, take down the entire profile (hide through
+an independent administrator hold, not account deletion), remove a photo/name/bio,
+or hide individual items. Hidden items have separate restore buttons and retain
+only their necessary value (photo file ID and position, or text). Other owner
+actions preserve hidden items; beginning user edits or deleting the account
+invalidates them. Restoring content sets `unreviewed`; `/start` runs automatic
+review before any publication. Releasing a hold neither approves content nor
+reactivates a user-paused account. `/resume`, `/start`, edits and automatic approval
+cannot clear an owner hold. Incomplete content cannot publish.
+
+The mutation, minimal actor/reason/time audit and notification are committed
+together. Telegram notification is best effort, claimed once, and never blindly
+retried: `sending` after interruption and `uncertain` mean delivery is unknown.
+The owner sees delivery status in the profile's recent audit. Users see durable
+reasons/remediation on `/start` and `/profile`; `/contentnotices [page]` provides
+older history (five entries per page). `/editprofile` corrects content; `/support`
+appeals owner holds. Paid entitlement and payment history are not reset.
+Account deletion clears private action content and hidden items, retaining paid
+accounting data as described in the policy.
+
+Automatic denials use fixed safe reason codes: `sexual`, `revealing`, `offensive`,
+`violence`, `other`. Provider outages remain unavailable, not accusations.
+Rejected registration inputs persist only their reason code, not the input.
+Policy version `2025-02-draft-3-owner-moderation` discloses owner inspection.
+
+Offline validation (no Telegram polling or real provider calls):
+
+```sh
+python -m unittest discover -s telegram-bot/tests -v
+python -m py_compile telegram-bot/*.py telegram-bot/tests/*.py
+git diff --check
+```
+
+Integration tests start disposable Unix-socket PostgreSQL clusters using `initdb`
+and `pg_ctl`; they never use application database credentials. Schema is applied
+idempotently on the bot's first database access; the main operator controls deployment.
 
 Checks use `omni-moderation-latest` (any flagged category denies), followed by
 `gpt-5.4-mini` via Responses with a strict boolean JSON schema. The second layer

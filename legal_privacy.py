@@ -7,8 +7,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-CURRENT_TERMS_VERSION = "2025-02-draft-2-automatic-review"
-CURRENT_PRIVACY_VERSION = "2025-02-draft-2-automatic-review"
+CURRENT_TERMS_VERSION = "2025-02-draft-3-owner-moderation"
+CURRENT_PRIVACY_VERSION = "2025-02-draft-3-owner-moderation"
 INCOMPLETE = (
     "הבוט: @LoviraBot\n"
     "אימייל לפניות: Lovirabot@gmail.com\n\n"
@@ -43,6 +43,8 @@ def consent_text():
         "• שהשם, התיאור והתמונות יישלחו ל־OpenAI לבדיקת תוכן אוטומטית "
         "לפני פרסום, גם במהלך ההרשמה. תוכן שטרם אושר מוסתר מאחרים. "
         "אין הבטחה לזיהוי מלא או לבטיחות; המקור נשלח לבוט ב־Telegram;\n"
+        "• שמנהל הבוט יכול לראות פרופילים שמורים, גם טרם אישור, ולהסתיר או להסיר תוכן "
+        "ולחסום פרסום עם סיבה. אין אישור ידני במקום הבדיקה האוטומטית;\n"
         "• שפרופיל ההיכרויות שלי, כולל שם תצוגה, גיל, תמונות ותיאור, יוצג "
         "למשתמשים מתאימים;\n"
         "• עיבוד מיקום לצורכי התאמה (למשתמשים יוצג טווח מרחק גס בלבד);\n"
@@ -101,7 +103,11 @@ POLICIES = {
         "ל־OpenAI, ללא מזהה Telegram או מיקום, לצורך סינון לפני פרסום. "
         "הבדיקה עשויה לטעות; אינה אימות גיל או זהות ואינה מבטיחה בטיחות. "
         "פרופילים קיימים מוסתרים עד להסכמה החדשה ולאישור אוטומטי. "
-        "תוכן שלא אושר לא מוצג לאחרים ולא מועבר למנהל לבדיקה ידנית. "
+        "תוכן שלא אושר לא מוצג למשתמשים אחרים. מנהל הבוט רשאי לצפות בפרופילים "
+        "שמורים, גם ממתינים או נדחים, ולהסיר/להסתיר תוכן ולחסום פרסום עם סיבה. "
+        "אין אישור ידני העוקף בדיקה אוטומטית. נשמרים יומן פעולות וסיבות; "
+        "להסתרה זמנית נשמר עותק מינימלי לשחזור לפני שינוי נוסף. "
+        "לתיקון: /editprofile; לערעור על חסימת מנהל: /support. "
         "נעשה ניסיון למחוק הודעה שנדחתה, אך מחיקה עשויה להיכשל ועותקי Telegram "
         "אינם בשליטתנו. בקשות Responses נשלחות עם store=false; "
         "אין בכך הבטחת אפס שמירה אצל הספק, הכפוף למדיניותו.\n\n"
@@ -121,7 +127,8 @@ POLICIES = {
         "במחיקה מנקים את הפרופיל והקשרים. נשמרת שורת חשבון מינימלית עם מזהה "
         "Telegram, שהוא עדיין מידע מזהה ואינו אנונימי, וכן רשומות תשלום מינימליות "
         "(מזהי חיוב, סכום, מטבע, מועד ותוקף) לצורכי התאמה חשבונאית. "
-        "פניות תמיכה ותוכנן נמחקים בעת מחיקת החשבון. אין כרגע לוח זמנים סופי למחיקת "
+        "פניות תמיכה, יומן ניהול תוכן ועותקי תוכן מוסתר נמחקים בעת מחיקת החשבון. "
+        "זכאות שכבר שולמה נשמרת בנפרד. אין כרגע לוח זמנים סופי למחיקת "
         "רשומות התשלום; נדרשת קביעת מדיניות ובדיקה משפטית.\n\n" + INCOMPLETE
     ),
     "terms": (
@@ -187,6 +194,15 @@ async def anonymize_account(pool, telegram_id):
     """Anonymize rather than delete the user row, preserving payment FKs."""
     async with pool.acquire() as connection:
         async with connection.transaction():
+            # Serialize deletion against administrator revision-guarded mutations.
+            await connection.fetchval(
+                "SELECT telegram_id FROM users WHERE telegram_id=$1 FOR UPDATE", telegram_id)
+            await connection.execute(
+                "DELETE FROM content_events WHERE telegram_id=$1", telegram_id)
+            await connection.execute(
+                "DELETE FROM submission_rejections WHERE telegram_id=$1", telegram_id)
+            await connection.execute(
+                "DELETE FROM hidden_content WHERE telegram_id=$1", telegram_id)
             await connection.execute(
                 "DELETE FROM matches WHERE user_a=$1 OR user_b=$1", telegram_id)
             await connection.execute(
@@ -200,11 +216,10 @@ async def anonymize_account(pool, telegram_id):
             return await connection.fetchval(
                 """UPDATE users SET username=NULL, full_name='נמחק', bio='',
                    photos='{}', latitude=NULL, longitude=NULL, is_active=FALSE,
-                   moderation_status='unreviewed',
+                   moderation_status='unreviewed', moderation_reason=NULL, admin_hold=FALSE,
                    moderation_revision=moderation_revision+1,
                    age=18, gender='male', target_gender='female',
-                   is_premium=FALSE, premium_until=NULL,
-                   telegram_payment_charge_id=NULL, updated_at=NOW()
+                   updated_at=NOW()
                    WHERE telegram_id=$1 RETURNING telegram_id""",
                 telegram_id,
             )
@@ -222,6 +237,7 @@ async def set_profile_visibility(pool, telegram_id, active):
             changed = await connection.fetchval(
                 """UPDATE users SET is_active=TRUE, updated_at=NOW()
                    WHERE telegram_id=$1 AND full_name<>'נמחק'
+                     AND content_complete(users)
                      AND moderation_status='approved'
                      AND latitude IS NOT NULL AND longitude IS NOT NULL
                      AND cardinality(photos)>0 AND bio<>''
@@ -366,7 +382,8 @@ def register_legal(dp, bot, get_pool):
             )
         elif result == "incomplete":
             await message.answer(
-                "לא ניתן להפעיל פרופיל שנמחק, אינו שלם או טרם אושר. יש להתחיל ב־/start."
+                "לא ניתן להפעיל פרופיל שנמחק, אינו שלם, טרם אושר או חסום בידי מנהל. "
+                "הסיבה זמינה ב־/profile או /start; לתיקון: /editprofile; לערעור על חסימת מנהל: /support."
             )
         else:
             await message.answer("לא נמצא פרופיל. אפשר להתחיל עם /start.")

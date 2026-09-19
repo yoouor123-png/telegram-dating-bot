@@ -21,13 +21,20 @@ POLICY = (
     "Deny sexual content, explicit or non-explicit nudity, revealing clothing, "
     "underwear, lingerie, swimwear, offensive/abusive text, hate speech or depicted "
     "hate symbols. Evaluate every image and all text together. If uncertain deny. "
-    "Return only the schema boolean allowed. Do not identify people or infer age."
+    "Also deny violence. Return the schema allowed and reason_code, using none "
+    "only when allowed; otherwise sexual, revealing, offensive, violence or other. "
+    "Do not identify people or infer age. Never return free-form reasons."
 )
 FORMAT = {
     "type": "json_schema", "name": "profile_safety", "strict": True,
     "schema": {
-        "type": "object", "properties": {"allowed": {"type": "boolean"}},
-        "required": ["allowed"], "additionalProperties": False,
+        "type": "object", "properties": {
+            "allowed": {"type": "boolean"},
+            "reason_code": {"type": "string", "enum": [
+                "none", "sexual", "revealing", "offensive", "violence", "other",
+            ]},
+        },
+        "required": ["allowed", "reason_code"], "additionalProperties": False,
     },
 }
 UNAVAILABLE = "בדיקת התוכן אינה זמינה כרגע. הפרופיל לא פורסם. נסה שוב מאוחר יותר."
@@ -35,6 +42,26 @@ DENIED = (
     "התוכן לא אושר לפרסום. אין לשלוח תוכן מיני, חושפני, פוגעני, "
     "תמונות בבגדי ים או בהלבשה תחתונה. אפשר לשלוח תוכן מתוקן."
 )
+REASONS = {
+    "sexual": "זוהה תוכן מיני. יש להחליפו בטקסט או בתמונה לא מיניים.",
+    "revealing": "זוהה לבוש חושפני, בגדי ים או הלבשה תחתונה. יש לשלוח תמונה בלבוש מלא.",
+    "offensive": "זוהה תוכן פוגעני או סמלי שנאה. יש להחליפו בתוכן מכבד.",
+    "violence": "זוהה תוכן אלים. יש להחליפו בתוכן ללא אלימות.",
+    "other": "התוכן לא עמד בכללי הבטיחות או לא היה ברור מספיק לבדיקה. יש להחליפו בתוכן ברור ובטוח.",
+}
+
+
+class Verdict(str):
+    """String-compatible result for callers, with only a fixed safe reason code."""
+    def __new__(cls, status, reason="other"):
+        value = super().__new__(cls, status)
+        value.reason = reason if reason in REASONS else "other"
+        return value
+
+
+def reason_message(reason):
+    return ("התוכן לא אושר לפרסום. " + REASONS.get(reason, REASONS["other"])
+            + "\nשלח תוכן מתוקן בשלב ההרשמה הנוכחי; לתיקון פרופיל קיים: /editprofile.")
 
 
 async def _post(session, endpoint, payload):
@@ -72,10 +99,14 @@ def parse_verdict(response):
             return result
 
         result = json.loads(texts[0], object_pairs_hook=unique_object)
-        if (type(result) is not dict or set(result) != {"allowed"}
+        if (type(result) is not dict or set(result) != {"allowed", "reason_code"}
                 or type(result["allowed"]) is not bool):
             return "unavailable"
-        return "approved" if result["allowed"] else "rejected"
+        reason = result["reason_code"]
+        if ((result["allowed"] and reason != "none")
+                or (not result["allowed"] and reason not in REASONS)):
+            return "unavailable"
+        return "approved" if result["allowed"] else Verdict("rejected", reason)
     except (ValueError, TypeError, IndexError):
         return "unavailable"
 
@@ -83,7 +114,7 @@ def parse_verdict(response):
 async def moderate(bot, *, name="", bio="", photos=(), known_suspected_csam=False):
     """Only call after current consent. Never forward known/suspected CSAM."""
     if known_suspected_csam:
-        return "rejected"
+        return Verdict("rejected", "sexual")
     key = os.getenv("OPENAI_API_KEY", "").strip()
     if not key:
         return "unavailable"
@@ -119,7 +150,14 @@ async def moderate(bot, *, name="", bio="", photos=(), known_suspected_csam=Fals
                     return "unavailable"
                 if item["flagged"]:
                     # Do not forward flagged content to the second model.
-                    return "rejected"
+                    categories = item.get("categories", {})
+                    reason = "other"
+                    for prefix, code in (("sexual", "sexual"), ("hate", "offensive"),
+                                         ("harassment", "offensive"), ("violence", "violence")):
+                        if any(v is True and k.startswith(prefix) for k, v in categories.items()):
+                            reason = code
+                            break
+                    return Verdict("rejected", reason)
             response = await _post(session, "responses", {
                 "model": REVIEW_MODEL, "store": False,
                 "instructions": POLICY,
@@ -137,17 +175,18 @@ async def moderate(bot, *, name="", bio="", photos=(), known_suspected_csam=Fals
 
 
 async def report_failure(message, verdict, *, delete=False):
+    denied = reason_message(getattr(verdict, "reason", "other"))
     if verdict == "rejected" and delete:
         try:
             await message.delete()
         except Exception:
             pass
         await message.answer(
-            DENIED + "\nניסינו למחוק את ההודעה; המחיקה עלולה להיכשל. "
+            denied + "\nניסינו למחוק את ההודעה; המחיקה עלולה להיכשל. "
             "עותקים ב־Telegram ומחוצה לו אינם בשליטתנו."
         )
     else:
-        await message.answer(DENIED if verdict == "rejected" else UNAVAILABLE)
+        await message.answer(denied if verdict == "rejected" else UNAVAILABLE)
 
 
 async def review_existing(pool, bot, user_id):
@@ -158,24 +197,27 @@ async def review_existing(pool, bot, user_id):
         user = await connection.fetchrow(
             "SELECT * FROM users WHERE telegram_id=$1", user_id,
         )
-    if not user or not user["photos"] or user["latitude"] is None:
+    if (not user or not user["photos"] or user["latitude"] is None
+            or user["longitude"] is None or not user["full_name"].strip()
+            or not user["bio"].strip() or user["full_name"] == "נמחק"):
         return "missing"
     if user["moderation_status"] == "approved":
         return "approved"
     if user["moderation_status"] == "rejected":
-        return "rejected"
+        return Verdict("rejected", user["moderation_reason"] or "other")
     verdict = await moderate(
         bot, name=user["full_name"], bio=user["bio"], photos=user["photos"],
     )
     async with pool.acquire() as connection:
         changed = await connection.fetchval(
-            """UPDATE users SET moderation_status=$3, updated_at=NOW()
+            """UPDATE users SET moderation_status=$3, moderation_reason=$4, updated_at=NOW()
                WHERE telegram_id=$1 AND moderation_revision=$2
                  AND moderation_status='unreviewed'
                  AND cardinality(photos)>0 AND latitude IS NOT NULL
                RETURNING telegram_id""",
             user_id, user["moderation_revision"],
             "unreviewed" if verdict == "unavailable" else verdict,
+            getattr(verdict, "reason", "other") if verdict == "rejected" else None,
         )
     return verdict if changed else "stale"
 

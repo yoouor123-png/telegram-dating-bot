@@ -61,8 +61,8 @@ class AdminStatsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("רשומים:", text)
 
     def test_query_excludes_deleted_and_expired_profiles(self):
-        self.assertIn("latitude IS NOT NULL", STATS_SQL)
-        self.assertIn("cardinality(photos) > 0", STATS_SQL)
+        self.assertIn("content_complete(users)", STATS_SQL)
+        self.assertIn("full_name<>'נמחק'", STATS_SQL)
         self.assertIn("WHERE is_active", STATS_SQL)
         self.assertIn("moderation_status='approved'", STATS_SQL)
         self.assertIn("moderation_status='unreviewed'", STATS_SQL)
