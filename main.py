@@ -1337,9 +1337,11 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    from admin_stats import register_admin_stats
     from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
+    register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)
     register_premium(
         dp, bot, get_pool, fetch_user, premium_is_active,
         settings.premium_price_stars,
