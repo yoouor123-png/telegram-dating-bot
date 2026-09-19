@@ -14,7 +14,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import (
-    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -345,30 +344,11 @@ async def startup() -> None:
     # Do not connect to the database here. The bot must start receiving
     # Telegram updates even when the database credentials need fixing.
     try:
-        await bot.set_my_commands(
-            [
-                BotCommand(command="browse", description="לראות פרופילים"),
-                BotCommand(command="profile", description="הפרופיל שלי"),
-                BotCommand(command="matches", description="המאצ׳ים שלי"),
-                BotCommand(command="premium", description="שדרוג לפרימיום"),
-                BotCommand(command="cancelpremium", description="ביטול חידוש פרימיום"),
-                BotCommand(command="paysupport", description="עזרה בתשלום"),
-                BotCommand(command="help", description="עזרה"),
-                BotCommand(command="legal", description="מרכז מידע משפטי ופרטיות"),
-                BotCommand(command="privacy", description="מדיניות פרטיות"),
-                BotCommand(command="terms", description="תנאי שימוש"),
-                BotCommand(command="refunds", description="ביטולים והחזרים"),
-                BotCommand(command="safety", description="בטיחות ודיווח"),
-                BotCommand(command="mydata", description="ייצוא המידע שלי"),
-                BotCommand(command="pause", description="השהיית הפרופיל"),
-                BotCommand(command="resume", description="הפעלת הפרופיל מחדש"),
-                BotCommand(command="deleteaccount", description="מחיקת חשבון"),
-                BotCommand(command="support", description="תמיכה"),
-                BotCommand(
-                    command="support_identity",
-                    description="הצגת מזהה Telegram שלי",
-                ),
-            ]
+        from command_menu import configure_command_menu
+        await configure_command_menu(bot, settings.support_owner_telegram_id)
+        logger.info(
+            "Telegram command menu configured; administrator configured: %s",
+            settings.support_owner_telegram_id is not None,
         )
     except Exception:
         logger.exception("Could not update Telegram command menu")
