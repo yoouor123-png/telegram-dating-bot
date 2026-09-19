@@ -208,6 +208,7 @@ async def startup() -> None:
         min_size=1,
         max_size=10,
         command_timeout=30,
+        statement_cache_size=0,
     )
     await setup_database()
     await bot.set_my_commands(
