@@ -6,13 +6,15 @@ Do not start another polling worker against the production bot token.
 `premium_handlers.py`, in-bot support, and `legal_privacy.py` are registered
 before onboarding handlers so payment, cancellation, support, and legal/account
 commands cannot be swallowed by registration state filters.
-The previous unregistered payment functions in main.py are retained temporarily
-for reference, not executed.
-
-Premium uses Telegram Stars recurring invoice links (30 days). The existing
+Premium uses one-time Telegram Stars invoice links (30 days), with no automatic
+renewal. The existing
 `PREMIUM_PRICE_STARS` setting is preserved (default 250); no ILS conversion is
-promised. `/paysupport` opens the in-bot support intake. Cancellation stops
-renewal, not the already-paid entitlement.
+promised. `/paysupport` opens the in-bot support intake. The existing bot process
+runs a durable expiry-notice worker: each expired period receives a system
+message offering optional manual purchase, not an automatic charge.
+Legacy recurring subscriptions are queued for renewal cancellation, preserving
+already-paid time. Failed cancellations remain pending for retry and are not
+reported as successful. `/cancelpremium` remains for these legacy subscriptions.
 
 Support links outside the bot are intentionally disabled. `SUPPORT_USERNAME` is
 retained in legacy settings but is not passed to the active support router.
@@ -32,8 +34,9 @@ for matching, while candidate cards show only five-kilometre ranges.
 
 `/pause` and `/resume` control profile visibility. `/mydata` exports only the
 requester's stored profile, acceptance, and payment fields in the private bot
-chat. `/deleteaccount` requires confirmation and attempts subscription
-cancellation before anonymizing any account with a stored charge. Failed
+chat. `/deleteaccount` requires confirmation and attempts legacy recurring
+subscription cancellation before anonymizing the account; a new one-time
+payment does not need renewal cancellation. Failed legacy
 cancellation leaves that account intact and routes the user to in-bot payment
 support. Deletion clears and deactivates the profile and removes
 relationship/support data, but it is not full anonymization: the identifying
@@ -80,10 +83,14 @@ contact link and never grants operator access.
 Payment records and entitlement updates commit in one transaction. Duplicate
 charge notifications do not grant extra time; delayed notifications cannot
 shorten the entitlement. Pending Telegram updates are preserved across restarts.
-If a successful payment cannot be persisted, logs identify the affected user for
-manual reconciliation; automatic reconciliation/refund is not implemented.
+If a successful payment cannot be persisted, the user is directed to payment
+support and logs record the error type without payment identifiers;
+automatic entitlement reconciliation/refund is not implemented.
 
 No live charge, cancellation, or production DB write was performed during build.
+After deployment, the maintenance worker attempts legacy renewal cancellation
+and processes due expiry notices. New successful payments and expiry notices are
+tested with a disposable local database and mocked Telegram calls, not live charges.
 
 ## Automatic pre-publication content checks
 

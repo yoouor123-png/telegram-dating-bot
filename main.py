@@ -3,7 +3,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -18,9 +18,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
-    LabeledPrice,
     Message,
-    PreCheckoutQuery,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
@@ -118,13 +116,12 @@ db_pool: Optional[asyncpg.Pool] = None
 db_schema_ready = False
 db_lock = asyncio.Lock()
 support_service = None
+premium_service = None
 
 MAX_PHOTOS = 3
 MAX_NAME_LENGTH = 80
 MAX_BIO_LENGTH = 500
 FREE_DAILY_LIKES = 10
-PREMIUM_DAYS = 30
-PREMIUM_PAYLOAD = "premium_monthly_15_ils"
 DISTANCE_BUCKET_KM = 5
 
 
@@ -275,6 +272,29 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN;
+CREATE TABLE IF NOT EXISTS premium_cancellations (
+    charge_id TEXT PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    confirmed_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','canceled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    error_kind TEXT
+);
+-- Deliberately no user FK: renewal retirement survives actual account removal.
+CREATE INDEX IF NOT EXISTS premium_cancellations_due
+    ON premium_cancellations(next_attempt) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS premium_expiry_notices (
+    telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','sending','sent','skipped','failed','uncertain')),
+    claimed_at TIMESTAMPTZ,
+    next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (telegram_id, expires_at)
+);
+
 CREATE INDEX IF NOT EXISTS users_matching_idx
     ON users (is_active, gender, target_gender, is_premium);
 CREATE INDEX IF NOT EXISTS interactions_from_to_idx
@@ -354,10 +374,14 @@ async def startup() -> None:
         logger.exception("Could not update Telegram command menu")
     if support_service is not None:
         support_service.start()
+    if premium_service is not None:
+        premium_service.start()
     logger.info("Telegram polling is starting")
 
 
 async def shutdown() -> None:
+    if premium_service is not None:
+        await premium_service.stop()
     if support_service is not None:
         await support_service.stop()
     await close_pool()
@@ -1360,112 +1384,6 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
     await show_next_profile(callback.from_user.id)
 
 
-async def premium(message: Message) -> None:
-    try:
-        user = await fetch_user(message.from_user.id)
-    except Exception:
-        await send_db_error(message)
-        return
-    if user is None:
-        await message.answer("קודם צריך להשלים הרשמה עם /start.")
-        return
-    if premium_is_active(user):
-        await message.answer("מנוי ה־Premium שלך כבר פעיל.")
-        return
-
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="פרופיל Premium 🌟",
-        description="לייקים ללא הגבלה וקדימות בתור.",
-        payload=PREMIUM_PAYLOAD,
-        provider_token="",
-        currency="XTR",
-        prices=[
-            LabeledPrice(
-                label="Premium לחודש — יעד 15 ש״ח",
-                amount=settings.premium_price_stars,
-            )
-        ],
-        subscription_period=PREMIUM_DAYS * 24 * 60 * 60,
-    )
-
-
-async def pre_checkout(query: PreCheckoutQuery) -> None:
-    if (
-        query.invoice_payload != PREMIUM_PAYLOAD
-        or query.currency != "XTR"
-        or query.total_amount != settings.premium_price_stars
-    ):
-        await bot.answer_pre_checkout_query(
-            query.id,
-            ok=False,
-            error_message="פרטי התשלום אינם תואמים.",
-        )
-        return
-    await bot.answer_pre_checkout_query(query.id, ok=True)
-
-
-async def successful_payment(message: Message) -> None:
-    payment = message.successful_payment
-    if payment is None or payment.invoice_payload != PREMIUM_PAYLOAD:
-        return
-    expiration_timestamp = getattr(
-        payment,
-        "subscription_expiration_date",
-        None,
-    )
-    premium_until = (
-        datetime.fromtimestamp(
-            expiration_timestamp,
-            tz=timezone.utc,
-        )
-        if expiration_timestamp
-        else datetime.now(timezone.utc) + timedelta(days=PREMIUM_DAYS)
-    )
-
-    try:
-        connection_pool = await get_pool()
-        async with connection_pool.acquire() as connection:
-            await connection.execute(
-                """
-                INSERT INTO payments (
-                    telegram_id, payload, currency, amount,
-                    telegram_payment_charge_id,
-                    provider_payment_charge_id, premium_until
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT DO NOTHING
-                """,
-                message.from_user.id,
-                payment.invoice_payload,
-                payment.currency,
-                payment.total_amount,
-                payment.telegram_payment_charge_id,
-                payment.provider_payment_charge_id,
-                premium_until,
-            )
-            await connection.execute(
-                """
-                UPDATE users
-                SET is_premium = TRUE,
-                    premium_until = $2,
-                    telegram_payment_charge_id = $3,
-                    updated_at = NOW()
-                WHERE telegram_id = $1
-                """,
-                message.from_user.id,
-                premium_until,
-                payment.telegram_payment_charge_id,
-            )
-    except Exception:
-        await send_db_error(message)
-        return
-
-    await message.answer(
-        "התשלום התקבל. הפרופיל שודרג ל־Premium 🌟"
-    )
-
-
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
@@ -1518,7 +1436,7 @@ if __name__ == "__main__":
     register_admin_content(dp, bot, get_pool, settings.support_owner_telegram_id)
     register_moderation(dp, settings.support_owner_telegram_id)
     register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)
-    register_premium(
+    premium_service = register_premium(
         dp, bot, get_pool, fetch_user, premium_is_active,
         settings.premium_price_stars,
     )

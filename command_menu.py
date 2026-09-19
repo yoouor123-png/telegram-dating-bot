@@ -7,7 +7,7 @@ PUBLIC_COMMANDS = [
     ("editprofile", "תיקון הפרופיל"),
     ("matches", "המאצ׳ים שלי"),
     ("premium", "שדרוג לפרימיום"),
-    ("cancelpremium", "ביטול חידוש פרימיום"),
+    ("cancelpremium", "בדיקת ביטול חידוש של מנוי ישן"),
     ("paysupport", "עזרה בתשלום"),
     ("help", "עזרה"),
     ("legal", "מרכז מידע משפטי ופרטיות"),

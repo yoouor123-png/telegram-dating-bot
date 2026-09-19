@@ -2,7 +2,7 @@ import pathlib
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -135,12 +135,12 @@ class PersistenceHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("photos='{}'", sql)
 
     async def test_failed_subscription_cancellation_never_anonymizes(self):
-        connection = FakeConnection(values=[1, "charge-1"])
-        bot = SimpleNamespace(edit_user_star_subscription=AsyncMock(
-            side_effect=RuntimeError("Telegram unavailable")))
-        result = await cancel_then_anonymize(bot, FakePool(connection), 77)
+        connection = FakeConnection(values=[1, 1])
+        bot = SimpleNamespace()
+        with (patch("premium_service.PremiumService.bootstrap", new_callable=AsyncMock),
+              patch("premium_service.PremiumService.cancel_legacy", new_callable=AsyncMock)):
+            result = await cancel_then_anonymize(bot, FakePool(connection), 77)
         self.assertEqual(result, "cancel_failed")
-        bot.edit_user_star_subscription.assert_awaited_once()
         sql = "\n".join(call[1] for call in connection.calls)
         self.assertNotIn("UPDATE users SET username=NULL", sql)
         self.assertNotIn("DELETE FROM matches", sql)

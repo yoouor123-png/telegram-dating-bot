@@ -147,14 +147,18 @@ POLICIES = {
         "להחזקה ולהצגה רק לצורך הפעלת פרופיל ושירות ההתאמות. אין רישיון לשימוש "
         "לאימון AI או לפרסום, והיישום הנוכחי אינו עושה שימוש כזה. ניתן לחסום, "
         "לדווח ולהשהות פרופיל. התאמה אינה בדיקת זהות, המלצה או הבטחת בטיחות.\n\n"
-        "Premium נרכש ב־Telegram Stars, מתחדש כל 30 ימים עד ביטול, ומעניק את "
+        "Premium נרכש ב־Telegram Stars בתשלום חד־פעמי ל־30 ימים, ללא חידוש "
+        "או חיוב אוטומטי, ומעניק את "
         "התכונות המתוארות במסך /premium. פרטי המחיר הקובעים מוצגים בחלון Telegram. "
+        "בתום התקופה תישלח הודעה עם אפשרות לרכוש תקופה נוספת באופן ידני. "
         "אין במסמך זה הבטחת זמינות או תוצאה מהיכרות.\n\n" + INCOMPLETE
     ),
     "refunds": (
         "ביטולים והחזרים — טיוטה חלקית\n\n"
-        "אפשר לבטל חידוש אוטומטי ב־/cancelpremium או בהגדרות Telegram. הביטול "
-        "אינו מוחק את התקופה שכבר שולמה. בקשת החזר נפתחת ב־/paysupport עם תאריך "
+        "רכישות חדשות הן חד־פעמיות ואינן מתחדשות אוטומטית. למנוי מתחדש ישן "
+        "ניתן לבדוק ולבטל חידוש ב־/cancelpremium או בהגדרות Telegram. "
+        "ביטול חידוש ישן אינו מוחק את התקופה שכבר שולמה. "
+        "בקשת החזר נפתחת ב־/paysupport עם תאריך "
         "וסכום Stars; פתיחת פנייה אינה מבצעת או מבטיחה החזר. תשלום ועיבוד החזר "
         "כפופים גם למנגנוני Telegram. זכויות שאינן ניתנות לוויתור לפי דין אינן "
         "נשללות בנוסח זה.\n\n" + INCOMPLETE
@@ -254,25 +258,35 @@ async def set_profile_visibility(pool, telegram_id, active):
 
 
 async def cancel_then_anonymize(bot, pool, telegram_id):
+    from contextlib import asynccontextmanager
+    from premium_service import PremiumService
+
     async with pool.acquire() as connection:
-        exists = await connection.fetchval(
-            "SELECT 1 FROM users WHERE telegram_id=$1", telegram_id)
-        charge = await connection.fetchval(
-            "SELECT telegram_payment_charge_id FROM users WHERE telegram_id=$1",
-            telegram_id,
-        )
-    if not exists:
-        return "missing"
-    if charge:
-        try:
-            await bot.edit_user_star_subscription(
-                user_id=telegram_id,
-                telegram_payment_charge_id=charge,
-                is_canceled=True,
-            )
-        except Exception:
-            return "cancel_failed"
-    return "deleted" if await anonymize_account(pool, telegram_id) else "missing"
+        # Reuse this transaction for helpers, keeping the user locked against
+        # payment grants and expiry sends until anonymization is complete.
+        class LockedPool:
+            @asynccontextmanager
+            async def acquire(self):
+                yield connection
+
+            async def execute(self, *args):
+                return await connection.execute(*args)
+
+        async with connection.transaction():
+            exists = await connection.fetchval(
+                "SELECT 1 FROM users WHERE telegram_id=$1 FOR UPDATE", telegram_id)
+            if not exists:
+                return "missing"
+            locked = LockedPool()
+            service = PremiumService(bot, None)
+            await service.bootstrap(locked)
+            await service.cancel_legacy(locked, telegram_id)
+            pending = await connection.fetchval(
+                """SELECT 1 FROM premium_cancellations
+                   WHERE telegram_id=$1 AND status<>'canceled' LIMIT 1""", telegram_id)
+            if pending:
+                return "cancel_failed"
+            return "deleted" if await anonymize_account(locked, telegram_id) else "missing"
 
 
 async def create_safety_report(pool, reporter_id, target_id, chat_id, message_id):
@@ -377,8 +391,9 @@ def register_legal(dp, bot, get_pool):
             await message.answer("הפרופיל חזר להיות מוצג להתאמות.")
         elif result == "paused":
             await message.answer(
-                "הפרופיל הושהה ואינו מוצג להתאמות. החידוש בתשלום לא בוטל; "
-                "לביטול חידוש: /cancelpremium. להפעלה מחדש: /resume."
+                "הפרופיל הושהה ואינו מוצג להתאמות. רכישות חדשות אינן מתחדשות "
+                "אוטומטית. לבדיקת ביטול חידוש של מנוי ישן: /cancelpremium. "
+                "להפעלה מחדש: /resume."
             )
         elif result == "incomplete":
             await message.answer(
