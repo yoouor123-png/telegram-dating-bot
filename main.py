@@ -56,9 +56,17 @@ class Settings:
         if price <= 0:
             raise RuntimeError("PREMIUM_PRICE_STARS must be positive")
 
+        database_url = required_env("DATABASE_URL")
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace(
+                "postgres://",
+                "postgresql://",
+                1,
+            )
+
         return cls(
             bot_token=required_env("BOT_TOKEN"),
-            database_url=required_env("DATABASE_URL"),
+            database_url=database_url,
             cloudinary_cloud_name=required_env("CLOUDINARY_CLOUD_NAME"),
             cloudinary_api_key=required_env("CLOUDINARY_API_KEY"),
             cloudinary_api_secret=required_env("CLOUDINARY_API_SECRET"),
