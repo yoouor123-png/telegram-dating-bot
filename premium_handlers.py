@@ -10,6 +10,14 @@ from premium_service import PremiumService, grant_payment, valid_payment
 log = logging.getLogger("dating-bot.premium")
 
 
+def premium_offer_text(price, status):
+    return (
+        f"{price} Stars ל־30 יום.\n"
+        "חד־פעמי, ללא חידוש.\n"
+        f"{status}"
+    )
+
+
 def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
     router = Router(name="premium")
     dp.include_router(router)
@@ -27,19 +35,13 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
             if not user or user["full_name"] == "נמחק":
                 await message.answer("קודם צריך להשלים הרשמה עם /start.")
                 return
-            active = (f"הפרימיום שלך פעיל עד {user['premium_until']:%d/%m/%Y %H:%M} UTC.\n"
-                      if is_active(user) else "")
+            active = (f"פעיל עד {user['premium_until']:%d/%m/%Y}.\n"
+                      if is_active(user) else "לא פעיל כרגע.\n")
             await message.answer(
-                active + f"Premium — {price} Stars ל־30 ימים, בתשלום חד־פעמי.\n"
-                "• לייקים ללא הגבלה • קדימות בטווח המרחק\n"
-                "אין חידוש או חיוב אוטומטי. רכישה נוספת מוסיפה 30 ימים.\n"
-                "בסיום תישלח הודעה לחידוש ידני. המחיר בשקלים נקבע ב־Telegram.\n"
-                "הפרימיום מופעל רק לאחר תשלום מוצלח.\n"
-                + await service.legacy_status(message.from_user.id) +
-                "\n\nהמסמכים הם טיוטה חלקית. פרטי מפעיל/כתובת ובדיקה משפטית חסרים. "
-                "יש לעיין בתנאים, בפרטיות ובהחזרים לפני רכישה.",
+                premium_offer_text(price, active.strip()),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="רכישת Premium", callback_data="premium:buy")],
+                    [InlineKeyboardButton(text="הטבות וסטטוס", callback_data="premium:details")],
                     [InlineKeyboardButton(text="תנאי שימוש", callback_data="legal:terms"),
                      InlineKeyboardButton(text="פרטיות", callback_data="legal:privacy")],
                     [InlineKeyboardButton(text="ביטולים והחזרים", callback_data="legal:refunds")],
@@ -50,6 +52,22 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
 
     router.message.register(show, Command("premium"))
     router.message.register(show, F.text.in_({"פרימיום", "Premium", "premium"}))
+
+    @router.callback_query(F.data == "premium:details")
+    async def details(callback):
+        await callback.answer()
+        if not callback.message or callback.message.chat.type != "private":
+            return
+        user = await fetch_user(callback.from_user.id)
+        if not user or user["full_name"] == "נמחק":
+            return
+        status = (f"פעיל עד {user['premium_until']:%d/%m/%Y}."
+                  if is_active(user) else "לא פעיל כרגע.")
+        await callback.message.answer(
+            "לייקים ללא הגבלה.\n"
+            "קדימות בתוך טווח המרחק.\n"
+            + status
+        )
 
     @router.callback_query(F.data == "premium:buy")
     async def buy(callback):
@@ -100,7 +118,9 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
         except Exception as error:
             log.warning("Paid entitlement requires reconciliation (%s)", type(error).__name__)
             await message.answer(
-                "התשלום התקבל אך שמירת Premium נכשלה. אל תשלם שוב; שמור קבלה ופנה ל־/paysupport.")
+                "Premium לא נשמר.\n"
+                "אל תשלם שוב; שמור קבלה.\n"
+                "לעזרה: /paysupport")
             return
         await message.answer("התשלום נשמר ו־Premium עודכן. תוקף: /premium")
 

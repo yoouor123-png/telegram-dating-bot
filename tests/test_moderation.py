@@ -189,7 +189,10 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                                   answer=AsyncMock())
         await moderation.report_failure(message, "rejected", delete=True)
         message.delete.assert_awaited_once()
-        self.assertIn("Telegram", message.answer.call_args.args[0])
+        text = message.answer.call_args.args[0]
+        self.assertLessEqual(len(text.splitlines()), 3)
+        self.assertIn("לא אושר", text)
+        self.assertNotIn("נמחק", text)
 
 
 class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):

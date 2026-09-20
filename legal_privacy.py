@@ -5,7 +5,7 @@ not a declaration of legal compliance or a substitute for legal review.
 """
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 CURRENT_TERMS_VERSION = "2025-02-draft-3-owner-moderation"
 CURRENT_PRIVACY_VERSION = "2025-02-draft-3-owner-moderation"
@@ -34,22 +34,9 @@ def coarse_distance_text(distance):
 
 def consent_text():
     return (
-        "הסכמה נדרשת לפני הרשמה\n\n"
-        "השירות מיועד לבני 18 ומעלה הנמצאים בישראל בלבד.\n"
-        f"תנאים: {CURRENT_TERMS_VERSION}; פרטיות: {CURRENT_PRIVACY_VERSION}.\n\n"
-        "בלחיצה על „אני בן/בת 18+ ומסכים/ה” אני מאשר/ת במפורש:\n"
-        "• שאני בן/בת 18 ומעלה ונמצא/ת בישראל;\n"
-        "• שקראתי את /terms ואת /privacy;\n"
-        "• שהשם, התיאור והתמונות יישלחו ל־OpenAI לבדיקת תוכן אוטומטית "
-        "לפני פרסום, גם במהלך ההרשמה. תוכן שטרם אושר מוסתר מאחרים. "
-        "אין הבטחה לזיהוי מלא או לבטיחות; המקור נשלח לבוט ב־Telegram;\n"
-        "• שמנהל הבוט יכול לראות פרופילים שמורים, גם טרם אישור, ולהסתיר או להסיר תוכן "
-        "ולחסום פרסום עם סיבה. אין אישור ידני במקום הבדיקה האוטומטית;\n"
-        "• שפרופיל ההיכרויות שלי, כולל שם תצוגה, גיל, תמונות ותיאור, יוצג "
-        "למשתמשים מתאימים;\n"
-        "• עיבוד מיקום לצורכי התאמה (למשתמשים יוצג טווח מרחק גס בלבד);\n"
-        "• עיבוד נתוני התאמה רגישים שמסרתי, כגון מגדר והעדפת מגדר.\n\n"
-        + INCOMPLETE
+        "השירות לבני 18+ בישראל.\n"
+        "המשך מאשר את התנאים והפרטיות.\n"
+        "הפירוט במרכז המידע."
     )
 
 
@@ -392,13 +379,15 @@ def register_legal(dp, bot, get_pool):
             await message.answer("הפרופיל מוצג שוב להתאמות.")
         elif result == "paused":
             await message.answer(
-                "הפרופיל הושהה ואינו מוצג. רכישות חדשות ללא חידוש אוטומטי. "
-                "חידוש ישן: /cancelpremium | להפעלה: /resume."
+                "הפרופיל הושהה ואינו מוצג.\n"
+                "להפעלה: /resume\n"
+                "חידוש ישן: /cancelpremium"
             )
         elif result == "incomplete":
             await message.answer(
-                "לא ניתן להפעיל פרופיל שנמחק, חלקי, לא מאושר או חסום. "
-                "סיבה: /profile או /start; התחלה מחדש: /resetprofile; ערעור: /support."
+                "לא ניתן להפעיל את הפרופיל.\n"
+                "חדש: /resetprofile\n"
+                "לערעור: /support"
             )
         else:
             await message.answer("לא נמצא פרופיל. אפשר להתחיל עם /start.")
@@ -444,24 +433,27 @@ def register_legal(dp, bot, get_pool):
         lines.extend(str(dict(row)) for row in acceptances)
         lines.append("payments:")
         lines.extend(str(dict(row)) for row in payments)
-        for chunk in export_chunks(lines):
-            await message.answer(chunk)
+        content = "\n".join(lines)
+        await message.answer_document(
+            BufferedInputFile(content.encode("utf-8"), filename="lovira-my-data.txt"),
+            caption="ייצוא המידע שלך מוכן.\nהקובץ נשלח בשיחה פרטית זו בלבד.",
+        )
 
     @router.message(Command("deleteaccount"))
     async def delete_prompt(message):
         if not await private(message):
             return
         await message.answer(
-            "מחיקת החשבון תשבית ותנקה את הפרופיל, התמונות, המיקום, המאצ׳ים, "
-            "האינטראקציות ופניות התמיכה. רשומות תשלום מינימליות ומזהה Telegram "
-            "יישמרו לצורכי התאמה חשבונאית; השורה הנשמרת אינה אנונימית. "
-            "אם קיים מזהה חיוב, ננסה תחילה לבטל "
-            "חידוש; אם הביטול ייכשל החשבון בתשלום לא יימחק.",
+            "פרופיל ומאצ׳ים יימחקו.\n"
+            "Premium ותשלומים יישמרו.\n"
+            "לא ניתן לבטל.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="אישור מחיקת החשבון", callback_data="legal:delete:confirm"),
                 InlineKeyboardButton(text="ביטול", callback_data="legal:delete:cancel"),
-            ]]),
+            ], [InlineKeyboardButton(
+                text="מה נשמר ולכמה זמן?", callback_data="legal:privacy",
+            )]]),
         )
 
     @router.callback_query(F.data == "legal:delete:cancel")
@@ -480,23 +472,24 @@ def register_legal(dp, bot, get_pool):
             )
         except Exception:
             await callback.message.answer(
-                "פרטי החשבון לא נוקו עקב שגיאת מסד נתונים. אם היה מנוי, ייתכן "
-                "שהחידוש כבר בוטל לפני השגיאה; יש לבדוק בהגדרות Telegram "
-                "ולפנות ב־/support."
+                "פרטי החשבון לא נוקו.\n"
+                "ייתכן שחידוש ישן בוטל.\n"
+                "בדקו ב־Telegram או /support"
             )
             return
         if result == "cancel_failed":
             await callback.message.answer(
-                "לא הצלחנו לאשר את ביטול החידוש ולכן החשבון בתשלום לא נמחק. "
-                "אפשר לנהל את המנוי בהגדרות Telegram ולפנות ב־/paysupport."
+                "ביטול החידוש לא אושר.\n"
+                "החשבון לא נמחק.\n"
+                "Telegram או /paysupport"
             )
             return
         if result == "deleted":
             await state.clear()
             await callback.message.answer(
-                "החשבון הושבת ופרטי הפרופיל נוקו. נשמרה שורת חשבון מינימלית "
-                "עם מזהה Telegram ורשומות תשלום לצורכי התאמה חשבונאית; מידע זה "
-                "עדיין מזהה ואינו אנונימי."
+                "החשבון הושבת והפרופיל נמחק.\n"
+                "זכאות ונתונים נדרשים נשמרו.\n"
+                "פירוט: /privacy"
             )
         else:
             await callback.message.answer("לא נמצא חשבון למחיקה.")

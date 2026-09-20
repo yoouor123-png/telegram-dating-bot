@@ -6,7 +6,7 @@ from contextlib import suppress
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 log = logging.getLogger("dating-bot.support")
 PAGE_SIZE = 8
@@ -52,7 +52,14 @@ async def deliver_support_reply(pool, bot, ticket, owner_id, body):
     try:
         sent = await bot.send_message(
             ticket["chat_id"],
-            f"מענה מצוות התמיכה לפנייה #{ticket['id']}:\n\n{body}",
+            f"מענה לתמיכה #{ticket['id']} התקבל.\n"
+            "לקריאת המענה המלא לחצו למטה.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="קריאת המענה",
+                    callback_data=f"supportreply:{reply_id}",
+                )
+            ]]),
         )
     except Exception as error:
         async with pool.acquire() as connection:
@@ -190,8 +197,7 @@ class NotificationService:
         text = (
             f"פניית תמיכה חדשה #{row['ticket_id']}\n"
             f"קטגוריה: {row['category']}\n"
-            f"מזהה משתמש: {row['telegram_id']}\n\n"
-            f"{row['details'][:2000]}"
+            "לפרטים פתחו את הפנייה."
         )
         try:
             await self.bot.send_message(
@@ -252,23 +258,16 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             rows.append([InlineKeyboardButton(
                 text="שיחה עם התמיכה", url=f"https://t.me/{username}")])
         text = (
-            "עזרה בתשלום\n"
-            "• תוקף Premium: /premium\n"
-            "• רכישות חדשות ללא חידוש אוטומטי; חידוש ישן: /cancelpremium\n"
-            "• חויבת בלי Premium? אל תשלם שוב. פתח פנייה ושמור קבלה.\n"
-            "• להחזר: פתח פנייה עם תאריך וסכום Stars; הפנייה אינה החזר אוטומטי."
+            "עזרה בתשלום וב־Premium.\n"
+            "אל תשלמו שוב אם חסרה זכאות.\n"
+            "פתחו פנייה ושמרו את הקבלה."
             if payment else
-            "תמיכה\n"
-            "• פרופילים: /browse | מאצ׳ים: /matches | פרופיל: /profile\n"
-            "• Premium: /premium | עזרה בתשלום: /paysupport"
+            "איך אפשר לעזור?\n"
+            "פתחו פנייה מסודרת בכפתור.\n"
+            "אין זמן מענה מובטח."
         )
-        text += "\n\n@LoviraBot — אימייל לפניות: Lovirabot@gmail.com"
         if owner_id is None:
-            text += (
-                "\n\nתיבת הפניות טרם הוגדרה: הפניות נשמרות בלבד. אין זמן מענה מובטח."
-            )
-        elif not username:
-            text += "\n\nאפשר לשמור פנייה; אין זמן מענה מובטח."
+            text = "אפשר לשמור פנייה.\nהתיבה טרם מחוברת למפעיל.\nאין זמן מענה מובטח."
         await message.answer(
             text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
         )
@@ -283,6 +282,37 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
     router.message.register(payment, Command("paysupport"))
     router.message.register(general, F.text.in_({"תמיכה", "support"}))
     router.message.register(payment, F.text == "עזרה בתשלום")
+
+    @router.callback_query(F.data.startswith("supportreply:"))
+    async def read_reply(callback):
+        if not callback.message or callback.message.chat.type != "private":
+            await callback.answer("זמין בשיחה פרטית בלבד.", show_alert=True)
+            return
+        try:
+            reply_id = int(callback.data.split(":", 1)[1])
+            pool = await get_pool()
+            async with pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """SELECT r.body, r.ticket_id
+                       FROM support_ticket_replies r
+                       JOIN support_tickets t ON t.id=r.ticket_id
+                       WHERE r.id=$1 AND t.telegram_id=$2
+                         AND r.delivery_status='sent'""",
+                    reply_id, callback.from_user.id,
+                )
+            if not row:
+                raise ValueError
+        except (TypeError, ValueError):
+            await callback.answer("המענה אינו זמין.", show_alert=True)
+            return
+        await callback.answer()
+        await callback.message.answer_document(
+            BufferedInputFile(
+                row["body"].encode("utf-8"),
+                filename=f"support-reply-{row['ticket_id']}.txt",
+            ),
+            caption=f"מענה מלא לפנייה #{row['ticket_id']}.\nהקובץ פרטי עבורך.",
+        )
 
     @router.message(Command("support_identity"))
     async def identity(message):
@@ -311,8 +341,9 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
         await state.set_state(Support.details)
         await state.update_data(support_category=callback.data.split(":")[1])
         await callback.message.answer(
-            "כתוב את הבעיה בטקסט אחד (עד 2,000 תווים).\n"
-            "אין לשלוח סיסמאות או פרטי כרטיס. לביטול: /cancel")
+            "כתבו את הבעיה בהודעה.\n"
+            "בלי סיסמה או פרטי כרטיס.\n"
+            "עד 2,000 תווים; /cancel")
 
     @router.message(Support.details, Command("cancel"))
     async def cancel(message, state):
@@ -456,16 +487,57 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             await callback.message.answer(
                 f"פנייה #{row['id']} · {row['status']}\n"
                 f"קטגוריה: {row['category']}\n"
-                f"מזהה משתמש: {row['telegram_id']}\n"
-                f"נפתחה: {row['created_at']:%Y-%m-%d %H:%M} UTC\n\n"
-                f"{row['details']}\n\nיומן פעולות אחרונות:\n{audit}",
-                reply_markup=_ticket_keyboard(row["id"], row["status"], page),
+                f"משתמש: {row['telegram_id']}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="הורדת פרטי הפנייה",
+                        callback_data=f"supportop:file:{row['id']}",
+                    )],
+                    *_ticket_keyboard(row["id"], row["status"], page).inline_keyboard,
+                ]),
             )
         except (ValueError, TypeError):
             await callback.message.answer("בקשת פנייה לא תקינה.")
         except Exception:
             log.exception("Could not load support ticket")
             await callback.message.answer("לא ניתן לטעון את הפנייה כרגע.")
+
+    @router.callback_query(F.data.startswith("supportop:file:"))
+    async def ticket_file(callback):
+        if not is_owner_private(callback, owner_id):
+            await deny_operator(callback)
+            return
+        try:
+            ticket_id = int(callback.data.rsplit(":", 1)[1])
+            pool = await get_pool()
+            async with pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    "SELECT * FROM support_tickets WHERE id=$1", ticket_id,
+                )
+                events = await connection.fetch(
+                    """SELECT event_type,detail,created_at
+                       FROM support_ticket_events WHERE ticket_id=$1
+                       ORDER BY created_at,id""", ticket_id,
+                )
+            if not row:
+                raise ValueError
+            content = (
+                f"ticket: {row['id']}\nuser: {row['telegram_id']}\n"
+                f"category: {row['category']}\nstatus: {row['status']}\n"
+                f"created: {row['created_at']}\n\ndetails:\n{row['details']}\n\n"
+                "events:\n" + "\n".join(
+                    f"{event['created_at']} {event['event_type']} {event['detail'] or ''}"
+                    for event in events
+                )
+            )
+        except (TypeError, ValueError):
+            await callback.answer("הפנייה אינה זמינה.", show_alert=True)
+            return
+        await callback.answer()
+        await callback.message.answer_document(
+            BufferedInputFile(content.encode("utf-8"), filename=f"ticket-{ticket_id}.txt"),
+            caption=f"פרטי פנייה #{ticket_id}.\nלמנהל בלבד.",
+        )
 
     @router.callback_query(F.data.startswith("supportop:reply:"))
     async def begin_reply(callback, state):
@@ -527,15 +599,17 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             log.exception("Could not persist support reply outcome")
             await state.clear()
             await message.answer(
-                "אירעה שגיאה ברישום ניסיון המסירה. אין לשלוח שוב בלי לבדוק "
-                "תחילה אם המשתמש קיבל את ההודעה."
+                "רישום המסירה נכשל.\n"
+                "אין לשלוח שוב לפני בדיקה.\n"
+                "ייתכן שהמענה כבר התקבל."
             )
             return
         if result == "uncertain":
             await state.clear()
             await message.answer(
-                "Telegram לא אישר את המסירה. ייתכן שההודעה נמסרה וייתכן שלא; "
-                "לא יתבצע ניסיון אוטומטי נוסף כדי למנוע מענה כפול."
+                "Telegram לא אישר מסירה.\n"
+                "ייתכן שהמענה התקבל.\n"
+                "לא יתבצע ניסיון נוסף."
             )
             return
         await state.clear()

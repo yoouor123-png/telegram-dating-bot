@@ -86,13 +86,16 @@ class LegalTextTests(unittest.TestCase):
 
     def test_consent_is_versioned_and_explicit(self):
         text = consent_text()
-        self.assertIn(CURRENT_TERMS_VERSION, text)
-        self.assertIn(CURRENT_PRIVACY_VERSION, text)
         self.assertIn("18", text)
-        self.assertIn("בישראל בלבד", text)
-        self.assertIn("מיקום", text)
-        self.assertIn("מגדר", text)
-        self.assertIn("טיוטה חלקית", text)
+        self.assertIn("בישראל", text)
+        self.assertIn("התנאים", text)
+        self.assertIn("הפרטיות", text)
+        self.assertLessEqual(len(text.splitlines()), 3)
+        self.assertIn(CURRENT_TERMS_VERSION, POLICIES["terms"])
+        self.assertIn(CURRENT_PRIVACY_VERSION, POLICIES["privacy"])
+        self.assertIn("מיקום", POLICIES["privacy"])
+        self.assertIn("מגדר", POLICIES["privacy"])
+        self.assertIn("טיוטה חלקית", POLICIES["privacy"])
 
     def test_export_chunks_never_silently_truncates(self):
         lines = ["header", "x" * 25, "tail"]

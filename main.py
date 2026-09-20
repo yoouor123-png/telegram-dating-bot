@@ -25,6 +25,11 @@ from aiogram.types import (
 from legal_privacy import coarse_distance_text
 from moderation import moderate, report_failure, review_existing, register_moderation
 from profile_reset import new_reset_token
+from profile_callbacks import (
+    fetch_profile_detail,
+    parse_bio_callback,
+    signed_bio_callback,
+)
 
 
 logging.basicConfig(
@@ -422,9 +427,20 @@ def gender_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def profile_keyboard(candidate_id: int) -> InlineKeyboardMarkup:
+def profile_keyboard(
+    viewer_id: int, candidate_id: int, candidate_revision: int,
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="תיאור מלא",
+                    callback_data=signed_bio_callback(
+                        settings.bot_token, viewer_id, candidate_id,
+                        candidate_revision, 0,
+                    ),
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="❤️ כן",
@@ -522,11 +538,9 @@ async def begin_registration(target, state: FSMContext, user_id: int) -> None:
             await connection.execute("DELETE FROM hidden_content WHERE telegram_id=$1", user_id)
     await state.update_data(profile_revision=revision if revision is not None else -1)
     await target.answer(
-        "לפני פרסום, השם, התיאור וכל תמונה נשלחים ל־OpenAI לבדיקה אוטומטית. "
-        "אין לשלוח עירום או תוכן המקדם הימורים; אין לשלוח חומר ידוע או חשוד "
-        "כפגיעה מינית בקטינים. המקור מגיע לבוט, אך לא יוצג לאחרים לפני אישור. "
-        "אין הבטחת זיהוי מלאה. אפשר לבטל עם /cancel.\n"
-        "מה שם התצוגה שלך? אין צורך בשם מלא."
+        "מה שם התצוגה שלך?\n"
+        "אין צורך בשם מלא.\n"
+        "לביטול: /cancel"
     )
     await state.set_state(Registration.name)
 
@@ -595,9 +609,9 @@ async def prompt_profile_reset(message: Message, state: FSMContext) -> None:
     await state.update_data(reset_revision=revision, reset_token=token)
     await state.set_state(ProfileReset.confirming)
     await message.answer(
-        "יימחקו הפרופיל, המאצ׳ים והפעולות שלך.\n"
+        "הפרופיל והמאצ׳ים יימחקו.\n"
         "Premium ותשלומים יישמרו.\n"
-        "חסימות והגבלות בטיחות יישארו בתוקף.",
+        "חסימות בטיחות יישארו.",
         reply_markup=reset_keyboard(revision, token),
     )
 
@@ -739,8 +753,9 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
         await state.clear()
         await callback.answer()
         await callback.message.answer(
-            "לא נרשמה הסכמה ולכן לא נפתח או הוצג פרופיל. "
-            "אפשר לעיין ב־/legal או לפנות ב־/support."
+            "לא נרשמה הסכמה.\n"
+            "הפרופיל לא נפתח.\n"
+            "/legal · /support"
         )
         return
     from legal_privacy import record_current_acceptance
@@ -1120,17 +1135,24 @@ async def show_next_profile(chat_id: int) -> None:
         return
     candidate = fresh
     premium = " 🌟" if premium_is_active(candidate) else ""
+    from message_pages import short_pages
+    name_preview = short_pages(
+        f"{candidate['full_name']}, {candidate['age']}{premium}", width=30,
+    )[0].splitlines()[0]
+    preview = short_pages(candidate["bio"] or "ללא תיאור", width=30)[0].splitlines()[0]
     caption = (
-        f"{candidate['full_name']}, {candidate['age']}{premium}\n\n"
-        f"{candidate['bio'] or 'ללא תיאור'}\n\n"
-        f"מרחק משוער: {coarse_distance_text(distance)}"
+        f"{name_preview}\n"
+        f"{preview}\n"
+        f"מרחק: {coarse_distance_text(distance)}"
     )
     try:
         await bot.send_photo(
             chat_id,
             candidate["photos"][0],
             caption=caption,
-            reply_markup=profile_keyboard(candidate["telegram_id"]),
+            reply_markup=profile_keyboard(
+                chat_id, candidate["telegram_id"], candidate["moderation_revision"],
+            ),
         )
     except Exception:
         logger.warning("Could not deliver approved profile")
@@ -1183,13 +1205,90 @@ async def profile(message: Message) -> None:
         "rejected": "נדחה",
         "unreviewed": "ממתין לבדיקה",
     }.get(user["moderation_status"], "לא ידוע")
+    from message_pages import short_pages
+    name_preview = short_pages(
+        f"{user['full_name']}, {user['age']}", width=30,
+    )[0].splitlines()[0]
     await message.answer(
-        f"שם: {user['full_name']}\n"
-        f"גיל: {user['age']}\n"
-        f"בדיקה: {review_status}\n"
-        f"תצוגה: {'פעילה' if visible_profile(user) else 'מוסתרת'}\n"
-        f"Premium: {status}\n"
-        f"תיאור: {user['bio']}"
+        f"{name_preview}\n"
+        f"{review_status} · {'פעיל' if visible_profile(user) else 'מוסתר'}\n"
+        f"Premium: {status}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="התיאור המלא", callback_data="profile:mine:0")
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("profile:mine:"))
+async def own_profile_page(callback: CallbackQuery) -> None:
+    if not callback.message or callback.message.chat.type != "private":
+        await callback.answer("זמין בשיחה פרטית בלבד.", show_alert=True)
+        return
+    try:
+        page = int(callback.data.rsplit(":", 1)[1])
+        user = await fetch_user(callback.from_user.id)
+        from message_pages import page_keyboard, short_pages
+        pages = short_pages(
+            user["bio"],
+            heading=f"{user['full_name']}, {user['age']} — תיאור:",
+        )
+        if not 0 <= page < len(pages):
+            raise ValueError
+    except (TypeError, ValueError, KeyError):
+        await callback.answer("העמוד אינו זמין.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        pages[page], reply_markup=page_keyboard("profile:mine", page, len(pages))
+    )
+
+
+@router.callback_query(F.data.startswith("pb:"))
+async def candidate_bio_page(callback: CallbackQuery) -> None:
+    if not callback.message or callback.message.chat.type != "private":
+        await callback.answer("זמין בשיחה פרטית בלבד.", show_alert=True)
+        return
+    try:
+        viewer_id, target_id, revision, page = parse_bio_callback(
+            settings.bot_token, callback.data,
+        )
+        if viewer_id != callback.from_user.id:
+            raise ValueError
+        target = await fetch_profile_detail(
+            await get_pool(), viewer_id, target_id, revision,
+        )
+        if not target:
+            raise ValueError
+        from message_pages import short_pages
+        pages = short_pages(target["bio"], heading=f"{target['full_name']} — תיאור:")
+        if not 0 <= page < len(pages):
+            raise ValueError
+    except (TypeError, ValueError, KeyError):
+        await callback.answer("הפרטים אינם זמינים.", show_alert=True)
+        return
+    except Exception:
+        logger.exception("Could not authorize profile details")
+        await callback.answer("הפרטים אינם זמינים.", show_alert=True)
+        return
+    await callback.answer()
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            text="הקודם",
+            callback_data=signed_bio_callback(
+                settings.bot_token, viewer_id, target_id, revision, page - 1,
+            ),
+        ))
+    if page + 1 < len(pages):
+        navigation.append(InlineKeyboardButton(
+            text="הבא",
+            callback_data=signed_bio_callback(
+                settings.bot_token, viewer_id, target_id, revision, page + 1,
+            ),
+        ))
+    await callback.message.answer(
+        pages[page],
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[navigation] if navigation else []),
     )
 
 
@@ -1344,21 +1443,26 @@ async def send_match_contact(chat_id: int, target) -> None:
         logger.warning("Could not refresh match contact for %s", target_id)
         # Do not risk linking to a stale username now owned by someone else.
 
-    text = f"יש לכם Match! 🎉\n{target['full_name']}\n"
-    if username:
-        text += f"פתיחת שיחה: https://t.me/{username}"
-    else:
-        text += (
-            "לחץ על הכפתור לפתיחת הפרופיל.\n"
-            "אם Telegram אינו מאפשר לפתוח אותו, הצד השני יכול להגדיר "
-            "שם משתמש ציבורי בהגדרות Telegram. לאחר מכן שלח שוב /matches."
-        )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
+    from message_pages import short_pages
+    name_preview = short_pages(target["full_name"])[0].splitlines()[0]
+    text = (
+        f"יש לכם Match! 🎉\n"
+        f"{name_preview}\n"
+        "לפתיחת הפרופיל לחצו למטה."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
             text="💬 פתיחת הפרופיל בטלגרם",
             url=user_link(target_id, username),
-        )
-    ]])
+        )],
+        [InlineKeyboardButton(
+            text="שם ותיאור מלאים",
+            callback_data=signed_bio_callback(
+                settings.bot_token, chat_id, target_id,
+                target["moderation_revision"], 0,
+            ),
+        )],
+    ])
     try:
         await bot.send_message(chat_id, text, reply_markup=keyboard)
     except Exception:
@@ -1368,8 +1472,9 @@ async def send_match_contact(chat_id: int, target) -> None:
         try:
             await bot.send_message(
                 chat_id,
-                f"יש לכם Match! 🎉\n{target['full_name']}\n"
-                "כפתור הפרופיל לא נשלח. אפשר להגדיר שם משתמש ולפתוח /matches.",
+                "יש לכם Match! 🎉\n"
+                f"{name_preview}\n"
+                "לפרטים: /matches",
             )
         except Exception:
             logger.warning("Could not deliver match notification to %s", chat_id)
@@ -1509,18 +1614,9 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "/start — הרשמה\n"
-        "/resetprofile — מחיקת הפרופיל ופתיחת הרשמה חדשה\n"
-        "/browse — פרופילים\n"
-        "/profile — הפרופיל שלי\n"
-        "/matches — המאצ׳ים שלי\n"
-        "/premium — שדרוג Premium\n"
-        "/pause — השהיית הפרופיל; /resume — הפעלה מחדש\n"
-        "/legal — פרטיות, תנאים, החזרים ובטיחות\n"
-        "/mydata — ייצוא המידע שלי\n"
-        "/deleteaccount — מחיקת החשבון\n"
-        "/support — תמיכה בתוך הבוט\n"
-        "/cancel — ביטול הרשמה"
+        "בחרו פעולה בתפריט.\n"
+        "/browse · /profile\n"
+        "/support · /legal"
     )
 
 

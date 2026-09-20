@@ -35,15 +35,9 @@ async def show_stats(message, get_pool, owner_id):
         await message.answer("לא ניתן לטעון את הנתונים כרגע. נסה שוב עם /stats.")
         return
     await message.answer(
-        "LoviraBot — נתוני מנהל\n\n"
-        f"פרופילים רשומים: {counts['total']:,}\n"
-        f"פעילים לתצוגה: {counts['active']:,}\n"
-        f"ממתינים לבדיקה אוטומטית: {counts['pending']:,}\n"
-        f"מנויי Premium בתוקף: {counts['premium']:,}\n\n"
-        "הספירה כוללת גם פרופילים חסרים, ללא חשבונות שנמחקו.\n"
-        "פעילים = תוכן מלא ומאושר ללא השהיה עצמית או חסימת מנהל; אינו מדד להתחברות.\n"
-        "Premium נספר גם בפרופיל מושהה, כל עוד התקופה ששולמה בתוקף.\n"
-        "לרענון הנתונים: /stats"
+        f"רשומים {counts['total']:,} · פעילים {counts['active']:,}\n"
+        f"ממתינים {counts['pending']:,} · Premium {counts['premium']:,}\n"
+        "לרענון: /stats"
     )
 
 

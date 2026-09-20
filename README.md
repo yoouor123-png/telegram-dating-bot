@@ -16,6 +16,12 @@ Legacy recurring subscriptions are queued for renewal cancellation, preserving
 already-paid time. Failed cancellations remain pending for retry and are not
 reported as successful. `/cancelpremium` remains for these legacy subscriptions.
 
+Routine bot copy is kept to at most three explicit short lines. Telegram may
+still wrap a line differently by client, font, or accessibility settings.
+Profiles use a compact preview with authenticated detail pages; long private
+exports, support replies, and moderation notices use UTF-8 text attachments so
+their full content remains available without flooding the chat.
+
 Support links outside the bot are intentionally disabled. `SUPPORT_USERNAME` is
 retained in legacy settings but is not passed to the active support router.
 
@@ -33,8 +39,9 @@ registered. Existing profiles are prompted on `/start`; paid entitlement,
 for matching, while candidate cards show only five-kilometre ranges.
 
 `/pause` and `/resume` control profile visibility. `/mydata` exports only the
-requester's stored profile, acceptance, and payment fields in the private bot
-chat. `/deleteaccount` requires confirmation and attempts legacy recurring
+requester's stored profile, acceptance, and payment fields as a private UTF-8
+text attachment instead of sending a sequence of long chat messages.
+`/deleteaccount` requires confirmation and attempts legacy recurring
 subscription cancellation before anonymizing the account; a new one-time
 payment does not need renewal cancellation. Failed legacy
 cancellation leaves that account intact and routes the user to in-bot payment

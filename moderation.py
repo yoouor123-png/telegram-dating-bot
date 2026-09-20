@@ -51,16 +51,16 @@ DENIED = (
     "התוכן לא אושר לפרסום. אפשר לשלוח תוכן מתוקן."
 )
 REASONS = {
-    "nudity": "זוהתה עירום גלוי. יש להחליף את התוכן.",
-    "gambling": "זוהה קידום או סיוע להימורים. יש להחליף את התוכן.",
-    "child_safety": "זוהה חשש בטיחותי לתוכן מיני הכולל קטינים. אין לשלוח תוכן כזה.",
+    "nudity": "סיבה: עירום גלוי.",
+    "gambling": "סיבה: קידום הימורים.",
+    "child_safety": "סיבה: חשש לפגיעה בקטינים.",
 }
 HISTORICAL_REASONS = {
-    "sexual": "התוכן נדחה בעבר לפי כללי התוכן המיני שהיו בתוקף בעת הבדיקה.",
-    "revealing": "התוכן נדחה בעבר לפי כללי הלבוש שהיו בתוקף בעת הבדיקה.",
-    "offensive": "התוכן נדחה בעבר לפי כללי התוכן הפוגעני שהיו בתוקף בעת הבדיקה.",
-    "violence": "התוכן נדחה בעבר לפי כללי האלימות שהיו בתוקף בעת הבדיקה.",
-    "other": "התוכן נדחה בעבר לפי כללי הבטיחות שהיו בתוקף בעת הבדיקה.",
+    "sexual": "סיבה היסטורית: תוכן מיני.",
+    "revealing": "סיבה היסטורית: כללי לבוש.",
+    "offensive": "סיבה היסטורית: תוכן פוגעני.",
+    "violence": "סיבה היסטורית: אלימות.",
+    "other": "סיבה היסטורית: כללי בטיחות.",
 }
 ALL_STORED_REASONS = REASONS | HISTORICAL_REASONS
 
@@ -77,10 +77,10 @@ class Verdict(str):
 
 def reason_message(reason):
     explanation = ALL_STORED_REASONS.get(
-        reason, "התוכן נדחה, אך קוד הסיבה ההיסטורי אינו זמין."
+        reason, "סיבת הדחייה אינה זמינה."
     )
-    return ("התוכן לא אושר לפרסום. " + explanation
-            + "\nבהרשמה: שלח תוכן אחר. לפרופיל חדש במקום הקיים: /resetprofile.")
+    return ("לא אושר לפרסום.\n" + explanation
+            + "\nלתיקון או /resetprofile")
 
 
 async def _post(session, endpoint, payload):
@@ -201,10 +201,7 @@ async def report_failure(message, verdict, *, delete=False):
             await message.delete()
         except Exception:
             pass
-        await message.answer(
-            denied + "\nניסינו למחוק את ההודעה; המחיקה עלולה להיכשל. "
-            "עותקים ב־Telegram ומחוצה לו אינם בשליטתנו."
-        )
+        await message.answer(denied)
     else:
         await message.answer(denied if verdict == "rejected" else UNAVAILABLE)
 

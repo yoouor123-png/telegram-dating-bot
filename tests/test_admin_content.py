@@ -191,8 +191,12 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         event = message(1)
         await admin.show_notices(event, self.pool, 1)
         text = "\n".join(call.args[0] for call in event.answer.call_args_list)
-        for item in ("Specific explicit reason", "/support", "/resetprofile"):
+        for item in ("/support", "/contentnotices"):
             self.assertIn(item, text)
+        stored = await self.pool.fetchval(
+            "SELECT notice FROM content_events WHERE id=$1", event_id)
+        for item in ("Specific explicit reason", "/support", "/resetprofile"):
+            self.assertIn(item, stored)
         self.assertEqual(await self.pool.fetchval(
             "SELECT delivery FROM content_events WHERE id=$1", event_id), "uncertain")
 

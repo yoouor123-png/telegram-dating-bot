@@ -51,7 +51,7 @@ class AdminStatsTests(unittest.IsolatedAsyncioTestCase):
             text = event.answer.call_args.args[0]
             for value in values.values():
                 self.assertIn(f"{value:,}", text)
-            self.assertIn("אינו מדד להתחברות", text)
+            self.assertLessEqual(len(text.splitlines()), 3)
 
     async def test_database_failure_is_not_reported_as_zero(self):
         event = message()

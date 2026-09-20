@@ -38,7 +38,11 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         callback = SimpleNamespace(
             answer=AsyncMock(), from_user=SimpleNamespace(id=77),
             message=SimpleNamespace(chat=SimpleNamespace(type="private"), answer=AsyncMock()))
-        await self.router.callback_query.handlers[0].callback(callback)
+        buy = next(
+            handler.callback for handler in self.router.callback_query.handlers
+            if handler.callback.__name__ == "buy"
+        )
+        await buy(callback)
         args = self.bot.create_invoice_link.await_args.kwargs
         self.assertNotIn("subscription_period", args)
         self.assertEqual(args["payload"], "premium:v2:77:250")
@@ -137,13 +141,26 @@ class PostgreSQLPremiumTests(unittest.IsolatedAsyncioTestCase):
         row = await self.pool.fetchrow("SELECT * FROM premium_cancellations")
         self.assertFalse(row["confirmed_recurring"])
         self.assertEqual(row["status"], "pending")
-        self.assertIn("עדיין לא אושר", await self.service.legacy_status(77))
+        self.assertIn("טרם אושר", await self.service.legacy_status(77))
         self.assertEqual(await self.expiry(), until)
         self.bot.edit_user_star_subscription.side_effect = None
         await self.pool.execute("UPDATE premium_cancellations SET next_attempt=NOW()")
         await self.service.tick()
         self.assertEqual(await self.pool.fetchval("SELECT status FROM premium_cancellations"), "canceled")
         self.assertEqual(await self.expiry(), until)
+
+    async def test_pending_legacy_expiry_still_says_premium_ended(self):
+        await self.expire()
+        await self.pool.execute(
+            """INSERT INTO premium_cancellations
+               (charge_id,telegram_id,confirmed_recurring)
+               VALUES('old-recurring',77,TRUE)"""
+        )
+        await self.service.notices(self.pool)
+        text = self.bot.send_message.await_args.args[1]
+        self.assertIn("Premium הסתיים", text)
+        self.assertIn("/cancelpremium", text)
+        self.assertLessEqual(len(text.splitlines()), 3)
 
     async def test_latest_charge_without_payment_bootstrapped(self):
         await self.pool.execute("UPDATE users SET telegram_payment_charge_id='unknown'")

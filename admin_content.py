@@ -2,7 +2,7 @@
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from support_handlers import is_owner_private
 
@@ -51,22 +51,24 @@ async def notices(pool, user_id, offset=0):
 
 
 async def show_notices(message, pool, user_id):
-    from moderation import reason_message
     async with pool.acquire() as c:
         reason = await c.fetchval("SELECT reason FROM submission_rejections WHERE telegram_id=$1", user_id)
         user = await c.fetchrow(
             "SELECT admin_hold,moderation_reason FROM users WHERE telegram_id=$1", user_id)
     if reason:
-        await message.answer("סיבת דחיית התוכן האחרון שנשלח:\n" + reason_message(reason))
+        from moderation import reason_message
+        await message.answer(reason_message(reason))
     if user and user["moderation_reason"]:
+        from moderation import reason_message
         await message.answer(reason_message(user["moderation_reason"]))
     if user and user["admin_hold"]:
         await message.answer("הפרסום חסום בידי מנהל. לערעור: /support.")
-    recent = await notices(pool, user_id)
-    for text in recent:
-        await message.answer(text, parse_mode=None)
-    if recent:
-        await message.answer("כל ההודעות: /contentnotices")
+    if await notices(pool, user_id):
+        await message.answer(
+            "יש עדכונים בפרופיל.\n"
+            "פירוט: /contentnotices\n"
+            "לערעור: /support"
+        )
 
 
 async def apply_action(pool, user_id, revision, action, reason, actor_id):
@@ -173,7 +175,13 @@ async def deliver(pool, bot, event_id):
         return "uncertain"
     outcome = "sent"
     try:
-        await bot.send_message(event["telegram_id"], event["notice"], parse_mode=None)
+        await bot.send_message(
+            event["telegram_id"],
+            "הפרופיל עודכן בידי מנהל.\n"
+            "לסיבה המלאה: /contentnotices\n"
+            "לערעור: /support",
+            parse_mode=None,
+        )
     except Exception:
         outcome = "uncertain"
     try:
@@ -241,26 +249,45 @@ def register_admin_content(dp, bot, get_pool, owner_id):
                     await message.answer_photo(item["value"], caption=description, protect_content=True)
                 except Exception:
                     await message.answer(description + " — התצוגה נכשלה.")
-            else:
-                await message.answer(description + "\n" + item["value"], parse_mode=None)
             rows.append([(f"שחזור {description}", prefix + f"restore_{item['id']}")])
+        report = [
+            f"profile: {user_id}",
+            f"revision: {u['moderation_revision']}",
+            f"name: {u['full_name']}",
+            f"bio: {u['bio']}",
+            f"moderation: {u['moderation_status']}",
+            f"admin_hold: {u['admin_hold']}",
+            f"active: {u['is_active']}",
+            "",
+            "hidden content:",
+        ]
+        report.extend(
+            f"{item['id']} {item['field']} {item['position']}: {item['value']}"
+            for item in hidden if item["field"] != "photo"
+        )
+        report.extend(["", "recent events:"])
+        for event in events:
+            delivery = {
+                "sent": "sent", "pending": "pending",
+                "sending": "unknown", "uncertain": "uncertain",
+            }[event["delivery"]]
+            report.append(
+                f"{event['created_at']} {label(event['action'])} "
+                f"[{delivery}]\nreason: {event['reason']}"
+            )
+        await message.answer_document(
+            BufferedInputFile(
+                "\n".join(report).encode("utf-8"),
+                filename=f"profile-{user_id}-review.txt",
+            ),
+            caption=f"פרטי פרופיל {user_id}.\nלמנהל בלבד.",
+        )
         await message.answer(
-            f"פרופיל {user_id}, גרסה {u['moderation_revision']}\n"
-            f"שם: {u['full_name']}\nתיאור: {u['bio']}\n"
-            f"בדיקה: {u['moderation_status']}; חסימת מנהל: {u['admin_hold']}; "
-            f"הפעלה עצמית: {u['is_active']}\n"
-            "פריטים מוסתרים ניתנים לשחזור בנפרד עד לעריכת המשתמש או מחיקת החשבון; "
-            "הסרה אינה ניתנת לשחזור.",
+            f"פרופיל {user_id}\n"
+            f"בדיקה: {u['moderation_status']}\n"
+            f"חסימת מנהל: {u['admin_hold']}",
             reply_markup=keyboard(rows), parse_mode=None,
         )
-        for event in events:
-            delivery = {"sent": "נשלחה", "pending": "טרם נעשה ניסיון",
-                        "sending": "תוצאה לא ידועה — לא לנסות שוב אוטומטית",
-                        "uncertain": "המסירה לא אושרה — ייתכן שנמסרה"}[event["delivery"]]
-            await message.answer(
-                f"{event['created_at']}: {label(event['action'])}\n"
-                f"סיבה: {event['reason']}\nמסירת ההודעה: {delivery}", parse_mode=None,
-            )
 
     @router.message(Command("admin"))
     async def admin(message, state):
@@ -281,9 +308,21 @@ def register_admin_content(dp, bot, get_pool, owner_id):
             parts = (message.text or "").split()
             page = max(1, int(parts[1])) if len(parts) > 1 else 1
             rows = await notices(await get_pool(), message.from_user.id, min(page - 1, 100000) * 5)
-            for text in rows:
-                await message.answer(text, parse_mode=None)
-            await message.answer(f"דף {page}. לדף הבא: /contentnotices {page + 1}" if rows else "אין עוד הודעות.")
+            if not rows:
+                await message.answer("אין עוד הודעות.")
+                return
+            content = "\n\n---\n\n".join(rows)
+            await message.answer_document(
+                BufferedInputFile(
+                    content.encode("utf-8"),
+                    filename=f"content-notices-{page}.txt",
+                ),
+                caption=(
+                    f"עדכוני פרופיל — דף {page}.\n"
+                    f"לדף הבא: /contentnotices {page + 1}\n"
+                    "הקובץ פרטי עבורך."
+                ),
+            )
         except (ValueError, OverflowError):
             await message.answer("לדוגמה: /contentnotices 2")
         except Exception:
@@ -328,9 +367,15 @@ def register_admin_content(dp, bot, get_pool, owner_id):
                 await state.clear()
                 outcome = await deliver(pool, bot, eid)
                 await event.message.answer(
-                    "הפעולה נשמרה. " + ("ההודעה נשלחה." if outcome == "sent" else
-                    "מסירת ההודעה לא אושרה; ייתכן שנמסרה. אין ניסיון חוזר אוטומטי.")
-                    + " הסיבה זמינה למשתמש ב־/profile וב־/start."
+                    (
+                        "הפעולה נשמרה.\n"
+                        "ההודעה נשלחה.\n"
+                        "הסיבה זמינה ב־/profile."
+                    ) if outcome == "sent" else (
+                        "הפעולה נשמרה.\n"
+                        "המסירה לא אושרה.\n"
+                        "אין ניסיון חוזר אוטומטי."
+                    )
                 )
         except (ValueError, KeyError, IndexError):
             await state.clear()
@@ -338,7 +383,9 @@ def register_admin_content(dp, bot, get_pool, owner_id):
         except Exception:
             await state.clear()
             await event.message.answer(
-                "לא ניתן לאשר את תוצאת הפעולה/המסירה כרגע. בדוק את יומן הפרופיל ב־/admin לפני פעולה נוספת.")
+                "תוצאת הפעולה אינה ידועה.\n"
+                "בדקו ביומן דרך /admin.\n"
+                "אל תחזרו על הפעולה כעת.")
 
     @router.message(AdminContent.reason)
     async def reason(message, state):
