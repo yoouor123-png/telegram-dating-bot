@@ -1,4 +1,4 @@
-"""Public commands plus a private, owner-scoped administration menu."""
+"""Minimal command menus, including any previously configured owner scope."""
 from aiogram.types import BotCommand, BotCommandScopeChat
 
 PUBLIC_COMMANDS = [
@@ -11,10 +11,12 @@ ADMIN_COMMANDS = []
 async def configure_command_menu(bot, owner_id):
     public = [BotCommand(command=name, description=text) for name, text in PUBLIC_COMMANDS]
     await bot.set_my_commands(public)
-    if owner_id is not None and ADMIN_COMMANDS:
+    if owner_id is not None:
         commands = [
             BotCommand(command=name, description=text)
             for name, text in ADMIN_COMMANDS
         ] + public
+        # Telegram retains chat-scoped menus across releases. Always replace the
+        # old owner menu, even when no additional admin commands are advertised.
         # Menu visibility is not authorization; every handler still checks sender.
         await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=owner_id))
