@@ -350,7 +350,11 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
         if message.chat.type != "private" or message.from_user is None:
             return
         await state.clear()
-        await message.answer("הפנייה בוטלה.")
+        from navigation import main_keyboard
+        await message.answer(
+            "הפנייה בוטלה.",
+            reply_markup=main_keyboard(message.from_user.id == owner_id),
+        )
 
     @router.message(Support.details, F.text, ~F.text.startswith("/"))
     async def save(message, state):
@@ -391,6 +395,8 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
                 if stored_only else
                 "צוות התמיכה יבדוק אותה; אין זמן מענה מובטח."
             ))
+        from navigation import show_main
+        await show_main(message, message.from_user.id == owner_id)
 
     @router.message(Support.details, ~F.text, ~F.successful_payment)
     async def text_only(message):
@@ -562,7 +568,11 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             await deny_operator(message)
             return
         await state.clear()
-        await message.answer("המענה בוטל.")
+        from navigation import main_keyboard
+        await message.answer(
+            "המענה בוטל.",
+            reply_markup=main_keyboard(message.from_user.id == owner_id),
+        )
 
     @router.message(OperatorReply.body, F.text, ~F.text.startswith("/"))
     async def send_reply(message, state):
@@ -651,4 +661,9 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             log.exception("Could not change support ticket status")
             await callback.message.answer("מצב הפנייה לא עודכן עקב שגיאה.")
 
+    from navigation import register_action
+    register_action("support", general)
+    register_action("paysupport", payment)
+    register_action("support_identity", lambda message, state: identity(message))
+    register_action("support_inbox", lambda message, state: inbox(message))
     return service

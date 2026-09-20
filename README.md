@@ -12,6 +12,15 @@ renewal. The existing
 promised. `/paysupport` opens the in-bot support intake. The existing bot process
 runs a durable expiry-notice worker: each expired period receives a system
 message offering optional manual purchase, not an automatic charge.
+
+The private bot UI is emoji-first. `/start` and `/menu` expose a two-by-two
+main keyboard for profiles, account, Premium, and other tools; only the
+configured owner receives the extra administration row. The visible Telegram
+command list is intentionally limited to `/start` and `/menu`. Legacy slash
+commands, including owner-only `/admin` and the `/editprofile` alias,
+remain supported. During registration, support, or an administrator draft,
+menu emoji offer an explicit continue/cancel choice without consuming or
+discarding the draft or replacing its contextual keyboard.
 Legacy recurring subscriptions are queued for renewal cancellation, preserving
 already-paid time. Failed cancellations remain pending for retry and are not
 reported as successful. `/cancelpremium` remains for these legacy subscriptions.

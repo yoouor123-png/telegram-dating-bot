@@ -425,5 +425,13 @@ def register_admin_content(dp, bot, get_pool, owner_id):
             return
         await message.answer("אשר בכפתור או בטל עם /admin.")
 
+    from navigation import register_action
+    register_action("admin", admin)
+    register_action(
+        "contentnotices",
+        lambda message, state: inbox(
+            message.model_copy(update={"text": "/contentnotices"})
+        ),
+    )
     dp.include_router(router)
     return router

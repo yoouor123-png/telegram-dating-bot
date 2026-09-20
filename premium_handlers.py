@@ -140,4 +140,7 @@ def register_premium(dp, bot, get_pool, fetch_user, is_active, price):
         if callback.message and callback.message.chat.type == "private":
             await callback.message.answer("לביטול חידוש ישן: /cancelpremium")
 
+    from navigation import register_action
+    register_action("premium", lambda message, state: show(message))
+    register_action("cancelpremium", lambda message, state: cancel(message))
     return service

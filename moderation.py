@@ -260,5 +260,7 @@ def register_moderation(dp, owner_id):
     async def configuration(message):
         await show_configuration(message, owner_id)
 
+    from navigation import register_action
+    register_action("moderation", lambda message, state: configuration(message))
     dp.include_router(router)
     return router

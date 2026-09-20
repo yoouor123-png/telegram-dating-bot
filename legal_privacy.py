@@ -346,6 +346,8 @@ def register_legal(dp, bot, get_pool):
         async def handler(message, policy=name):
             await show_policy(message, policy)
         router.message.register(handler, Command(command))
+        from navigation import register_action
+        register_action(command, lambda message, state, fn=handler: fn(message))
 
     @router.callback_query(F.data.in_({
         "legal:privacy", "legal:terms", "legal:refunds", "legal:safety"
@@ -520,4 +522,14 @@ def register_legal(dp, bot, get_pool):
             "להוספת פרטים: /support"
         )
 
+    from navigation import register_action
+    register_action("legal", lambda message, state: center(message))
+    register_action("pause", lambda message, state: visibility(
+        message.model_copy(update={"text": "/pause"})
+    ))
+    register_action("resume", lambda message, state: visibility(
+        message.model_copy(update={"text": "/resume"})
+    ))
+    register_action("mydata", lambda message, state: mydata(message))
+    register_action("deleteaccount", lambda message, state: delete_prompt(message))
     return router

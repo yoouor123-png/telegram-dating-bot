@@ -48,5 +48,7 @@ def register_admin_stats(dp, get_pool, owner_id):
     async def stats(message):
         await show_stats(message, get_pool, owner_id)
 
+    from navigation import register_action
+    register_action("stats", lambda message, state: stats(message))
     dp.include_router(router)
     return router

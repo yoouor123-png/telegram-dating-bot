@@ -644,7 +644,15 @@ async def resetprofile_callback(callback: CallbackQuery, state: FSMContext) -> N
     if action == "cancel":
         await state.clear()
         await callback.answer("הפעולה בוטלה.")
-        await callback.message.answer("הפרופיל נשאר ללא שינוי.")
+        from navigation import main_keyboard
+        await callback.message.answer(
+            "הפרופיל נשאר ללא שינוי.",
+            reply_markup=main_keyboard(
+                callback.from_user.id == getattr(
+                    globals().get("settings"), "support_owner_telegram_id", None
+                )
+            ),
+        )
         return
     if action != "confirm":
         await callback.answer("האישור אינו תקין.", show_alert=True)
@@ -711,10 +719,23 @@ async def start(message: Message, state: FSMContext) -> None:
         and current_user["bio"].strip()
     )
     if current_user and not profile_complete:
+        from navigation import main_keyboard
         await message.answer(
-            "הפרופיל הקיים אינו שלם או נדחה. לפתיחת פרופיל חדש: /resetprofile."
+            "הפרופיל הקיים אינו שלם.\nאפשר לפתוח אותו מחדש.",
+            reply_markup=main_keyboard(
+                message.from_user.id == settings.support_owner_telegram_id
+            ),
         )
         return
+
+    if not profile_complete:
+        from navigation import main_keyboard
+        await message.answer(
+            "אפשר לחזור לתפריט בכל עת.",
+            reply_markup=main_keyboard(
+                message.from_user.id == settings.support_owner_telegram_id
+            ),
+        )
 
     try:
         accepted = await require_current_consent(
@@ -734,7 +755,9 @@ async def start(message: Message, state: FSMContext) -> None:
             return
         await message.answer(
             "הפרופיל שלך כבר קיים.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=__import__("navigation").main_keyboard(
+                message.from_user.id == settings.support_owner_telegram_id
+            ),
         )
         await show_next_profile(message.chat.id)
         return
@@ -787,9 +810,15 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
+    from navigation import main_keyboard
     await message.answer(
-        "הרישום בוטל. אפשר להתחיל מחדש עם /start.",
-        reply_markup=ReplyKeyboardRemove(),
+        "התהליך בוטל.",
+        reply_markup=main_keyboard(
+            getattr(getattr(message, "from_user", None), "id", None)
+            == getattr(
+                globals().get("settings"), "support_owner_telegram_id", None
+            )
+        ),
     )
 
 
@@ -1005,9 +1034,14 @@ async def finish_photos_or_explain(
         await message.answer("הפרופיל השתנה בזמן הבדיקה ולא פורסם. התחל שוב עם /start.")
         return
     await state.clear()
+    from navigation import main_keyboard
     await message.answer(
         "הפרופיל אושר ונשמר.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=main_keyboard(
+            message.from_user.id == getattr(
+                globals().get("settings"), "support_owner_telegram_id", None
+            )
+        ),
     )
     await show_next_profile(message.chat.id)
 
@@ -1613,10 +1647,9 @@ async def profile_action(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
-    await message.answer(
-        "בחרו פעולה בתפריט.\n"
-        "/browse · /profile\n"
-        "/support · /legal"
+    from navigation import show_main
+    await show_main(
+        message, message.from_user.id == settings.support_owner_telegram_id
     )
 
 
@@ -1632,7 +1665,10 @@ async def support_command(message: Message) -> None:
 
 @router.message()
 async def fallback(message: Message) -> None:
-    await message.answer("שלח /start כדי להתחיל.")
+    from navigation import show_main
+    await show_main(
+        message, message.from_user.id == settings.support_owner_telegram_id
+    )
 
 
 async def main() -> None:
@@ -1651,6 +1687,14 @@ if __name__ == "__main__":
     from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
+    from navigation import register_action, register_navigation
+    register_navigation(dp, settings.support_owner_telegram_id)
+    register_action("browse", browse)
+    register_action("start", start)
+    register_action("profile", lambda message, state: profile(message))
+    register_action("matches", lambda message, state: matches_command(message))
+    register_action("resetprofile", resetprofile_command)
+    register_action("help", lambda message, state: help_command(message))
     register_admin_content(dp, bot, get_pool, settings.support_owner_telegram_id)
     register_moderation(dp, settings.support_owner_telegram_id)
     register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)

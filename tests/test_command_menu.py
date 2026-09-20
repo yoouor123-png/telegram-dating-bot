@@ -9,24 +9,20 @@ from command_menu import ADMIN_COMMANDS, PUBLIC_COMMANDS, configure_command_menu
 
 
 class CommandMenuTests(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_reset_replaces_edit_and_account_deletion_stays_distinct(self):
+    async def test_public_command_list_is_intentionally_minimal(self):
         commands = dict(PUBLIC_COMMANDS)
-        self.assertIn("resetprofile", commands)
-        self.assertNotIn("editprofile", commands)
-        self.assertEqual(commands["deleteaccount"], "מחיקת חשבון")
-        self.assertIn("מחדש", commands["resetprofile"])
+        self.assertEqual(set(commands), {"start", "menu"})
 
-    async def test_owner_gets_private_menu_without_exposing_public_admin_commands(self):
+    async def test_owner_has_no_extra_visible_slash_commands(self):
         bot = SimpleNamespace(set_my_commands=AsyncMock())
         await configure_command_menu(bot, 123)
-        public, private = bot.set_my_commands.await_args_list
-        admin_names = {name for name, _ in ADMIN_COMMANDS}
-        self.assertTrue(admin_names.isdisjoint({c.command for c in public.args[0]}))
+        bot.set_my_commands.assert_awaited_once()
+        public = bot.set_my_commands.await_args
+        self.assertEqual(
+            {c.command for c in public.args[0]},
+            {"start", "menu"},
+        )
         self.assertNotIn("scope", public.kwargs)
-        self.assertTrue(admin_names.issubset({c.command for c in private.args[0]}))
-        self.assertEqual(private.kwargs["scope"].type, "chat")
-        self.assertEqual(private.kwargs["scope"].chat_id, 123)
-        self.assertIn("browse", {c.command for c in private.args[0]})
 
     async def test_unconfigured_owner_only_gets_public_menu(self):
         bot = SimpleNamespace(set_my_commands=AsyncMock())
