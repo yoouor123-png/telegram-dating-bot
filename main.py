@@ -123,6 +123,7 @@ db_schema_ready = False
 db_lock = asyncio.Lock()
 support_service = None
 premium_service = None
+handlers_registered = False
 
 MAX_PHOTOS = 3
 MAX_NAME_LENGTH = 80
@@ -1681,20 +1682,33 @@ async def main() -> None:
     )
 
 
-if __name__ == "__main__":
+def register_handlers() -> None:
+    """Attach production routers once, without starting polling."""
+    global handlers_registered, premium_service, support_service
+    if handlers_registered:
+        return
     from admin_content import register_admin_content
     from admin_stats import register_admin_stats
     from legal_privacy import register_legal
     from premium_handlers import register_premium
     from support_handlers import register_support
-    from navigation import register_action, register_navigation
+    from navigation import (
+        register_action as register_navigation_action,
+        register_navigation,
+    )
     register_navigation(dp, settings.support_owner_telegram_id)
-    register_action("browse", browse)
-    register_action("start", start)
-    register_action("profile", lambda message, state: profile(message))
-    register_action("matches", lambda message, state: matches_command(message))
-    register_action("resetprofile", resetprofile_command)
-    register_action("help", lambda message, state: help_command(message))
+    register_navigation_action("browse", browse)
+    register_navigation_action("start", start)
+    register_navigation_action(
+        "profile", lambda message, state: profile(message)
+    )
+    register_navigation_action(
+        "matches", lambda message, state: matches_command(message)
+    )
+    register_navigation_action("resetprofile", resetprofile_command)
+    register_navigation_action(
+        "help", lambda message, state: help_command(message)
+    )
     register_admin_content(dp, bot, get_pool, settings.support_owner_telegram_id)
     register_moderation(dp, settings.support_owner_telegram_id)
     register_admin_stats(dp, get_pool, settings.support_owner_telegram_id)
@@ -1711,4 +1725,9 @@ if __name__ == "__main__":
     )
     register_legal(dp, bot, get_pool)
     dp.include_router(router)
+    handlers_registered = True
+
+
+if __name__ == "__main__":
+    register_handlers()
     asyncio.run(main())
