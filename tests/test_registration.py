@@ -14,7 +14,7 @@ from aiogram.types import Location, PhotoSize, Update
 
 import main
 import moderation
-from conversation_storage import PostgresFSMStorage, PollingLease
+from conversation_storage import PostgresFSMStorage, PollingLease, DrainingDispatcher
 import test_support as support_tests
 from legal_privacy import record_current_acceptance
 from navigation import register_navigation, register_action
@@ -61,7 +61,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
     def make_dispatcher(self, pool):
         async def get_pool():
             return pool
-        self.dp = Dispatcher(
+        self.dp = DrainingDispatcher(
             storage=PostgresFSMStorage(get_pool),
             events_isolation=SimpleEventIsolation(),
         )
@@ -334,3 +334,106 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.pool.fetchval(
             "SELECT owner FROM telegram_polling_lease WHERE bot_id=$1", self.bot.id,
         ), "successor")
+
+    async def prepare_photo_step(self):
+        await self.accept()
+        await self.click("nav:action:start")
+        await self.feed("Display name")
+        await self.feed("29")
+        await self.feed(location=Location(latitude=32.0, longitude=34.0))
+        await self.feed("נקבה")
+
+    async def test_shutdown_drains_photo_save_before_resources_close(self):
+        await self.prepare_photo_step()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original = main.finish_photos_or_explain
+
+        async def delayed_save(message, state):
+            entered.set()
+            await release.wait()
+            await original(message, state)
+
+        with patch.object(main, "finish_photos_or_explain", delayed_save):
+            sender = asyncio.create_task(self.feed(photo=[PhotoSize(
+                file_id="shutdown-photo", file_unique_id="shutdown-id",
+                width=640, height=640,
+            )]))
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            drainer = asyncio.create_task(self.dp.drain_updates(timeout=3))
+            try:
+                await asyncio.sleep(.05)
+                self.assertFalse(drainer.done())
+                release.set()
+                await asyncio.wait_for(sender, timeout=3)
+                await asyncio.wait_for(drainer, timeout=3)
+            finally:
+                release.set()
+                sender.cancel()
+                drainer.cancel()
+                await asyncio.gather(sender, drainer, return_exceptions=True)
+        self.assertIsNone(await self.state.get_state())
+        self.assertEqual(await self.pool.fetchval(
+            "SELECT photos FROM users WHERE telegram_id=$1", USER.id,
+        ), ["shutdown-photo"])
+        self.assertFalse(self.dp.active_updates)
+
+    async def test_failed_save_keeps_photo_and_retry_uses_real_callback_sender(self):
+        import asyncpg
+        await self.prepare_photo_step()
+        actual_pool = self.pool
+        fail = [True]
+
+        class Connection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            async def fetchval(self, sql, *args):
+                if sql.lstrip().startswith("INSERT INTO users") and fail[0]:
+                    fail[0] = False
+                    raise asyncpg.InterfaceError("pool is closing")
+                return await self.connection.fetchval(sql, *args)
+
+        class Acquisition:
+            async def __aenter__(self):
+                self.context = actual_pool.acquire()
+                return Connection(await self.context.__aenter__())
+
+            async def __aexit__(self, *args):
+                return await self.context.__aexit__(*args)
+
+        class Pool:
+            def acquire(self):
+                return Acquisition()
+
+        with patch.object(main, "get_pool", AsyncMock(return_value=Pool())):
+            await self.feed(photo=[PhotoSize(
+                file_id="retry-photo", file_unique_id="retry-id",
+                width=640, height=640,
+            )])
+            self.assertEqual(
+                await self.state.get_state(), main.Registration.photos.state,
+            )
+            self.assertEqual(
+                (await self.state.get_data())["photos"], ["retry-photo"],
+            )
+            self.assertIsNone(await self.pool.fetchval(
+                "SELECT telegram_id FROM users WHERE telegram_id=$1", USER.id,
+            ))
+            response = next(
+                c for c in reversed(self.session.calls) if isinstance(c, SendMessage)
+            )
+            self.assertEqual(
+                response.reply_markup.inline_keyboard[0][0].callback_data,
+                "registration:retry",
+            )
+            await self.click("registration:retry")
+        self.assertIsNone(await self.state.get_state())
+        row = await self.pool.fetchrow(
+            "SELECT telegram_id,photos FROM users WHERE telegram_id=$1", USER.id,
+        )
+        self.assertEqual(row["telegram_id"], USER.id)
+        self.assertEqual(row["photos"], ["retry-photo"])

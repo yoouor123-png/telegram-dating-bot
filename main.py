@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,7 +25,7 @@ from aiogram.types import (
 )
 from legal_privacy import coarse_distance_text
 from moderation import report_failure, review_existing, register_moderation
-from conversation_storage import PostgresFSMStorage, PollingLease
+from conversation_storage import PostgresFSMStorage, PollingLease, DrainingDispatcher
 from profile_reset import new_reset_token
 from profile_callbacks import (
     fetch_profile_detail,
@@ -114,7 +115,7 @@ class Settings:
 
 settings = Settings.from_env()
 bot = Bot(token=settings.bot_token)
-dp = Dispatcher(
+dp = DrainingDispatcher(
     storage=PostgresFSMStorage(lambda: get_pool()),
     events_isolation=SimpleEventIsolation(),
 )
@@ -511,7 +512,9 @@ def premium_is_active(user) -> bool:
 
 
 async def send_db_error(message: Message) -> None:
-    logger.error("Database operation failed")
+    error = sys.exception()
+    logger.error("Database operation failed (%s)",
+                 type(error).__name__ if error else "unknown")
     await message.answer("שגיאת מסד נתונים. נסה שוב מאוחר יותר.")
 
 
@@ -1019,6 +1022,21 @@ async def registration_photo(
     )
 
 
+@router.callback_query(F.data == "registration:retry")
+async def retry_registration(callback: CallbackQuery, state: FSMContext) -> None:
+    if (not callback.message or callback.message.chat.type != "private"
+            or await state.get_state() != Registration.photos.state):
+        await callback.answer("ההרשמה הזו כבר אינה פעילה.", show_alert=True)
+        return
+    await callback.answer()
+    await finish_photos_or_explain(
+        callback.message.model_copy(update={
+            "from_user": callback.from_user, "text": "סיימתי",
+        }),
+        state,
+    )
+
+
 @router.message(Registration.photos, F.text)
 async def finish_photos_or_explain(
     message: Message, state: FSMContext
@@ -1098,8 +1116,16 @@ async def finish_photos_or_explain(
                 data.get("profile_revision", -1),
                 bool(data.get("fresh_after_reset")),
             )
-    except Exception:
-        await send_db_error(message)
+    except Exception as error:
+        logger.error("Registration save failed (%s)", type(error).__name__)
+        await message.answer(
+            "השמירה לא הושלמה.\nאפשר לנסות שוב בלי הרשמה.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="נסה לשמור שוב", callback_data="registration:retry",
+                )
+            ]]),
+        )
         return
 
     if saved is None:
@@ -1747,6 +1773,7 @@ async def fallback(message: Message) -> None:
 async def main() -> None:
     lease = PollingLease(get_pool, bot.id)
     dp.startup.register(startup)
+    dp.shutdown.register(dp.drain_updates)
     # Polling has stopped by the time shutdown runs; release before pool.close.
     dp.shutdown.register(lease.stop)
     dp.shutdown.register(shutdown)

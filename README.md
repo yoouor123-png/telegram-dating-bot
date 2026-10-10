@@ -133,6 +133,9 @@ expire after 24 hours, are cleaned periodically, and are removed on completion,
 cancellation and account deletion. A renewable PostgreSQL lease permits only one
 polling owner during deployments. Loss of ownership or a failed renewal stops
 the polling owner; shutdown releases the lease before closing the pool.
+Shutdown first drains in-flight Telegram updates before releasing ownership or
+closing the database and Telegram session. Failed registration saves keep the
+draft and photo and offer a retry button rather than requiring new registration.
 
 Automatic AI content screening is disabled at the operator's request. Registration
 and `/start` do not call an external content model or require `OPENAI_API_KEY`.

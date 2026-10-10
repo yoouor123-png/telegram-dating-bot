@@ -7,9 +7,45 @@ from collections.abc import Mapping
 
 from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
+from aiogram import Dispatcher
 
 
 logger = logging.getLogger("dating-bot.conversations")
+
+
+class DrainingDispatcher(Dispatcher):
+    """Finish in-flight updates before closing DB/Telegram or releasing ownership."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.active_updates = set()
+
+    async def feed_update(self, bot, update, **kwargs):
+        task = asyncio.current_task()
+        self.active_updates.add(task)
+        try:
+            return await super().feed_update(bot, update, **kwargs)
+        finally:
+            self.active_updates.discard(task)
+
+    async def drain_updates(self, *args, timeout=20, **kwargs):
+        # Let already-scheduled update tasks enter feed_update before the snapshot.
+        await asyncio.sleep(0)
+        current = asyncio.current_task()
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            pending = {
+                t for t in self.active_updates if t is not current and not t.done()
+            }
+            if not pending:
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                logger.warning("Unfinished updates canceled after shutdown grace")
+                return
+            await asyncio.wait(pending, timeout=remaining)
 
 
 class PostgresFSMStorage(BaseStorage):
