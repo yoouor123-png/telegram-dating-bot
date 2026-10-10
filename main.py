@@ -532,7 +532,9 @@ async def begin_registration(target, state: FSMContext, user_id: int) -> None:
     async with connection_pool.acquire() as connection:
         async with connection.transaction():
             revision = await connection.fetchval(
-                """UPDATE users SET moderation_status='unreviewed',
+                """UPDATE users SET moderation_status=CASE
+                    WHEN moderation_status='rejected' THEN 'rejected'
+                    ELSE 'unreviewed' END,
                    moderation_revision=moderation_revision+1, updated_at=NOW()
                    WHERE telegram_id=$1 RETURNING moderation_revision""", user_id,
             )
@@ -707,10 +709,10 @@ async def start(message: Message, state: FSMContext) -> None:
         and current_user["latitude"] is not None
         and current_user["longitude"] is not None
         and current_user["photos"]
+        and current_user["moderation_status"] != "rejected"
         and current_user["full_name"].strip() not in {"", "נמחק"}
         and current_user["bio"].strip()
     )
-    rejected = bool(current_user and current_user["moderation_status"] == "rejected")
     # A confirmed reset leaves an empty row to retain Premium and restrictions.
     # Its in-memory flag can be lost on a restart; recover it from the empty row.
     fresh_after_reset = bool(
@@ -733,17 +735,13 @@ async def start(message: Message, state: FSMContext) -> None:
             message.from_user.id,
             message,
             state,
-            existing_profile=profile_complete or rejected,
+            existing_profile=profile_complete,
             fresh_after_reset=fresh_after_reset,
         )
     except Exception:
         await send_db_error(message)
         return
     if not accepted:
-        return
-
-    if rejected:
-        await ensure_review(message, message.from_user.id)
         return
 
     if profile_complete:

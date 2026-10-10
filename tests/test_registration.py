@@ -213,13 +213,22 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
             "SELECT telegram_id FROM users WHERE telegram_id=$1", USER.id,
         ))
 
-    async def test_rejection_is_not_silently_cleared_by_start(self):
+    async def test_old_rejection_allows_new_registration_not_old_content_approval(self):
         await self.seed(rejected=True)
         await self.accept()
         await self.click("nav:action:start")
-        self.assertIsNone(await self.state.get_state())
+        self.assertEqual(
+            await self.state.get_state(), main.Registration.name.state,
+        )
         self.assertEqual(await self.pool.fetchval(
             "SELECT moderation_status FROM users WHERE telegram_id=$1", USER.id,
         ), "rejected")
         self.browse.assert_not_awaited()
         self.provider.assert_not_awaited()
+        self.assertEqual(
+            await moderation.review_existing(self.pool, self.bot, USER.id),
+            "rejected",
+        )
+        row = await self.fill_basic()
+        self.assertEqual(row["moderation_status"], "approved")
+        self.assertEqual(row["photos"], ["new-photo"])

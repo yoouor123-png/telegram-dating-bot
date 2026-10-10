@@ -122,6 +122,8 @@ Basic registration asks for a display name, adult age, location, gender and one
 photo. A neutral default description is supplied; the first photo saves the
 profile immediately, without a "finished" message or separate approval screen.
 `/start` lets incomplete accounts register directly without a manual reset.
+Previously rejected accounts can also register fresh content directly; their old
+content stays rejected until the replacement registration has been saved.
 An empty row retained by a confirmed reset can finish registration after a worker
 restart while retaining Premium and administrator holds. A user-paused nonempty
 profile remains paused when incomplete content is replaced.
