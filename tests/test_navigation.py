@@ -96,6 +96,7 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         )
         state = SimpleNamespace(
             get_state=AsyncMock(return_value="Registration:name"),
+            get_data=AsyncMock(return_value={}),
             update_data=AsyncMock(),
         )
         await handler(message, state)

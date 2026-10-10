@@ -11,6 +11,7 @@ from aiogram.types import (
 
 _actions = {}
 OWNER_ACTIONS = {"admin", "stats", "moderation", "support_inbox"}
+READ_ONLY_ACTIONS = {"help", "legal", "privacy", "terms", "refunds", "safety"}
 
 MAIN_TEXT = {
     "🔍": "browse", "🔍 פרופילים": "browse",
@@ -111,11 +112,14 @@ def _workflow_keyboard(token):
 
 async def _blocked_by_workflow(target, state):
     expected_state = await state.get_state()
-    token = secrets.token_urlsafe(8)
-    await state.update_data(
-        nav_pending_token=token,
-        nav_pending_state=expected_state,
-    )
+    data = await state.get_data()
+    token = data.get("nav_pending_token")
+    if (not token or data.get("nav_pending_state") != expected_state):
+        token = secrets.token_urlsafe(8)
+        await state.update_data(
+            nav_pending_token=token,
+            nav_pending_state=expected_state,
+        )
     await target.answer(
         "יש תהליך פעיל.\nהמשיכו או בטלו אותו.",
         reply_markup=_workflow_keyboard(token),
@@ -128,7 +132,8 @@ async def _run_action(command, event, state, owner_id):
     ):
         await event.answer("הפעולה אינה זמינה.")
         return
-    if await state.get_state() is not None:
+    if (await state.get_state() is not None
+            and command not in READ_ONLY_ACTIONS):
         await _blocked_by_workflow(event, state)
         return
     handler = _actions.get(command)
@@ -224,18 +229,46 @@ def register_navigation(dp, owner_id):
     @router.callback_query(F.data.startswith("nav:workflow:continue:"))
     async def workflow_continue(callback, state):
         if not await valid_workflow_callback(callback, state):
-            await callback.answer("הכפתור כבר אינו בתוקף.", show_alert=True)
+            await callback.answer("השלב השתנה. לא נמחק מידע.", show_alert=True)
+            if await state.get_state() is not None:
+                await _blocked_by_workflow(callback.message, state)
+            else:
+                await show_main(callback.message, callback.from_user.id == owner_id)
+                await callback.message.answer(
+                    "התהליך הסתיים.\nאפשר להתחיל הרשמה חדשה.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="התחלת הרשמה",
+                            callback_data="nav:action:start",
+                        )
+                    ]]),
+                )
             return
         await state.update_data(
             nav_pending_token=None,
             nav_pending_state=None,
         )
         await callback.answer("ממשיכים בתהליך הפעיל.")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("המשיכו מהשאלה האחרונה של הבוט.")
 
     @router.callback_query(F.data.startswith("nav:workflow:cancel:"))
     async def workflow_cancel(callback, state):
         if not await valid_workflow_callback(callback, state):
-            await callback.answer("הכפתור כבר אינו בתוקף.", show_alert=True)
+            await callback.answer("השלב השתנה. לא נמחק מידע.", show_alert=True)
+            if await state.get_state() is not None:
+                await _blocked_by_workflow(callback.message, state)
+            else:
+                await show_main(callback.message, callback.from_user.id == owner_id)
+                await callback.message.answer(
+                    "התהליך הסתיים.\nאפשר להתחיל הרשמה חדשה.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="התחלת הרשמה",
+                            callback_data="nav:action:start",
+                        )
+                    ]]),
+                )
             return
         await callback.answer("התהליך בוטל.")
         await state.clear()

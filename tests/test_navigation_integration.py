@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.methods import (
@@ -20,6 +20,8 @@ from aiogram.types import (
 
 from admin_content import AdminContent, register_admin_content
 from main import Registration
+import main
+from legal_privacy import consent_text, register_legal
 from navigation import register_navigation
 from premium_handlers import register_premium
 from support_handlers import Support, register_support
@@ -67,6 +69,27 @@ class EmptyPool:
 
     async def fetch(self, *args):
         return []
+
+
+class SupportInboxPool:
+    def __init__(self, ticket, events):
+        self.ticket = ticket
+        self.events = events
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def fetchrow(self, *args):
+        return self.ticket
+
+    async def fetch(self, *args):
+        return self.events
 
 
 def incoming(text, message_id=1, **updates):
@@ -145,6 +168,13 @@ class NavigationDispatcherTests(unittest.IsolatedAsyncioTestCase):
         await state.set_state(Registration.name)
         await self.feed_message(incoming("🔍", 20))
         first = (await state.get_data())["nav_pending_token"]
+        await self.feed_message(incoming("/menu", 201, entities=[
+            MessageEntity(type="bot_command", offset=0, length=5),
+        ]))
+        self.assertEqual(
+            (await state.get_data())["nav_pending_token"],
+            first,
+        )
         await state.set_state(Support.details)
         await self.feed_message(incoming("🔍", 21))
         second = (await state.get_data())["nav_pending_token"]
@@ -160,6 +190,176 @@ class NavigationDispatcherTests(unittest.IsolatedAsyncioTestCase):
         current = (await state.get_data())["nav_pending_token"]
         await self.feed_callback(callback(f"nav:workflow:cancel:{current}", 62))
         self.assertIsNone(await state.get_state())
+
+    async def test_stale_cancel_keeps_newer_workflow_and_shows_fresh_choice(self):
+        state = await self.context()
+        await state.set_state(Registration.name)
+        await self.feed_message(incoming("🔍", 301))
+        old_token = (await state.get_data())["nav_pending_token"]
+
+        await state.set_state(Support.details)
+        await self.feed_message(incoming("🔍", 302))
+        current_token = (await state.get_data())["nav_pending_token"]
+        await self.feed_callback(
+            callback(f"nav:workflow:cancel:{old_token}", 303)
+        )
+
+        self.assertEqual(await state.get_state(), Support.details.state)
+        self.assertEqual(
+            (await state.get_data())["nav_pending_token"],
+            current_token,
+        )
+        self.assertTrue(any(
+            isinstance(call, SendMessage)
+            and call.text == "יש תהליך פעיל.\nהמשיכו או בטלו אותו."
+            for call in self.session.calls
+        ))
+
+    async def test_expired_cancel_shows_a_real_restart_button(self):
+        state = await self.context()
+        await state.set_state(Registration.name)
+        await self.feed_message(incoming("🔍", 401))
+        expired = (await state.get_data())["nav_pending_token"]
+        await state.clear()
+        await self.feed_callback(
+            callback(f"nav:workflow:cancel:{expired}", 402)
+        )
+
+        self.assertIsNone(await state.get_state())
+        restart = [
+            call for call in self.session.calls
+            if isinstance(call, SendMessage)
+            and call.text == "התהליך הסתיים.\nאפשר להתחיל הרשמה חדשה."
+        ][-1]
+        self.assertEqual(
+            restart.reply_markup.inline_keyboard[0][0].callback_data,
+            "nav:action:start",
+        )
+
+    async def test_legal_pages_keep_consent_workflow_and_offer_return(self):
+        register_legal(self.dp, self.bot, AsyncMock())
+        consent_router = Router(name="consent-return-test")
+        consent_router.callback_query.register(
+            main.registration_consent_return,
+            Registration.consent,
+            F.data == "legal:consent:return",
+        )
+        self.dp.include_router(consent_router)
+        state = await self.context()
+        await state.set_state(Registration.consent)
+
+        await self.feed_callback(callback("nav:action:legal", 501))
+        center = [
+            call for call in self.session.calls
+            if isinstance(call, SendMessage)
+            and "מרכז מידע משפטי" in (call.text or "")
+        ][-1]
+        self.assertEqual(await state.get_state(), Registration.consent.state)
+        self.assertIn(
+            "legal:consent:return",
+            {
+                button.callback_data
+                for row in center.reply_markup.inline_keyboard
+                for button in row
+            },
+        )
+
+        await self.feed_callback(callback("legal:privacy", 502))
+        policy = [
+            call for call in self.session.calls
+            if isinstance(call, SendMessage)
+            and (call.text or "").startswith("מדיניות פרטיות")
+        ][-1]
+        self.assertIn(
+            "legal:consent:return",
+            {
+                button.callback_data
+                for row in policy.reply_markup.inline_keyboard
+                for button in row
+            },
+        )
+        await self.feed_callback(callback("legal:consent:return", 503))
+        self.assertEqual(await state.get_state(), Registration.consent.state)
+        self.assertTrue(any(
+            isinstance(call, SendMessage)
+            and call.text == consent_text()
+            for call in self.session.calls
+        ))
+
+    async def test_old_consent_buttons_never_approve_or_clear_a_new_step(self):
+        expired_router = Router(name="expired-consent-test")
+        expired_router.callback_query.register(
+            main.expired_consent_action,
+            F.data.in_({
+                "legal:consent:accept", "legal:consent:decline",
+            }),
+        )
+        self.dp.include_router(expired_router)
+        state = await self.context()
+        await state.set_state(Registration.name)
+        await self.feed_callback(callback("legal:consent:accept", 601))
+
+        self.assertEqual(await state.get_state(), Registration.name.state)
+        self.assertFalse(any(
+            isinstance(call, SendMessage) and call.text == consent_text()
+            for call in self.session.calls
+        ))
+
+        await state.clear()
+        await self.feed_callback(callback("legal:consent:accept", 602))
+        self.assertIsNone(await state.get_state())
+        restart = [
+            call for call in self.session.calls
+            if isinstance(call, SendMessage)
+            and call.text == "אפשר לפתוח הרשמה חדשה."
+        ][-1]
+        self.assertEqual(
+            restart.reply_markup.inline_keyboard[0][0].callback_data,
+            "nav:action:start",
+        )
+
+    async def test_support_ticket_details_are_readable_in_bot_without_file(self):
+        timestamp = datetime.now(timezone.utc)
+        ticket = {
+            "id": 7,
+            "telegram_id": 555,
+            "category": "general",
+            "details": "הודעה מלאה " * 180,
+            "status": "open",
+            "created_at": timestamp,
+        }
+        events = [
+            {
+                "event_type": "status_changed",
+                "detail": f"פעולה {index}: " + ("פרט " * 100),
+                "created_at": timestamp,
+            }
+            for index in range(10)
+        ]
+        pool = SupportInboxPool(ticket, events)
+        register_support(
+            self.dp, self.bot, AsyncMock(return_value=pool), "", owner_id=42,
+        )
+        await self.feed_callback(callback("supportop:view:7:0", 701))
+
+        detail = [
+            call for call in self.session.calls
+            if isinstance(call, SendMessage)
+            and (call.text or "").startswith("פנייה #7")
+        ][-1]
+        self.assertIn("תוכן הפנייה:", detail.text)
+        self.assertIn(ticket["details"], detail.text)
+        self.assertIn("פעילות אחרונה:", detail.text)
+        self.assertIn("פעולה 0:", detail.text)
+        self.assertNotIn("פעולה 5:", detail.text)
+        self.assertLess(len(detail.text), 4096)
+        button_data = {
+            button.callback_data
+            for row in detail.reply_markup.inline_keyboard
+            for button in row
+        }
+        self.assertNotIn("supportop:file:7", button_data)
+        self.assertIn("supportop:reply:7", button_data)
 
     async def test_real_support_action_has_callback_actor_and_legacy_command_routes(self):
         register_support(

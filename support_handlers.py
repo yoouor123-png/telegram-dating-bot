@@ -129,6 +129,23 @@ def _ticket_keyboard(ticket_id, status, page):
     ])
 
 
+def _ticket_detail_text(row, events):
+    history = []
+    for event in events[:5]:
+        detail = " ".join(str(event["detail"] or "").split())[:100]
+        event_type = str(event["event_type"]).replace("\n", " ")[:60]
+        created = event["created_at"].strftime("%Y-%m-%d %H:%M")
+        history.append(f"• {created} {event_type} {detail}".rstrip()[:200])
+    history_text = "\n".join(history) or "אין עדיין פעולות מפעיל."
+    return (
+        f"פנייה #{row['id']} · {row['status']}\n"
+        f"קטגוריה: {row['category']}\n"
+        f"משתמש: {row['telegram_id']}\n\n"
+        f"תוכן הפנייה:\n{row['details']}\n\n"
+        f"פעילות אחרונה:\n{history_text}"
+    )
+
+
 class NotificationService:
     """Persistent ticket notification delivery, owned by the polling process."""
 
@@ -485,20 +502,9 @@ def register_support(dp, bot, get_pool, support_username, owner_id):
             if not row:
                 await callback.message.answer("הפנייה לא נמצאה.")
                 return
-            audit = "\n".join(
-                f"• {event['created_at']:%Y-%m-%d %H:%M} "
-                f"{event['event_type']} {event['detail'] or ''}".rstrip()
-                for event in events
-            ) or "אין עדיין פעולות מפעיל."
             await callback.message.answer(
-                f"פנייה #{row['id']} · {row['status']}\n"
-                f"קטגוריה: {row['category']}\n"
-                f"משתמש: {row['telegram_id']}",
+                _ticket_detail_text(row, events),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="הורדת פרטי הפנייה",
-                        callback_data=f"supportop:file:{row['id']}",
-                    )],
                     *_ticket_keyboard(row["id"], row["status"], page).inline_keyboard,
                 ]),
             )

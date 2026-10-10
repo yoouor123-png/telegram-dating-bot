@@ -23,7 +23,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from legal_privacy import coarse_distance_text
-from moderation import moderate, report_failure, review_existing, register_moderation
+from moderation import report_failure, review_existing, register_moderation
 from profile_reset import new_reset_token
 from profile_callbacks import (
     fetch_profile_detail,
@@ -551,23 +551,13 @@ async def check_submission(message, **content) -> bool:
     try:
         accepted = await has_current_acceptance(await get_pool(), message.from_user.id)
     except Exception:
-        await report_failure(message, "unavailable")
+        await message.answer("לא ניתן לאמת את ההסכמה כרגע. נסה שוב מאוחר יותר.")
         return False
     if not accepted:
-        await message.answer("נדרשת הסכמה חדשה לפני בדיקה. פתח /start.")
+        await message.answer("נדרשת הסכמה חדשה לפני פרסום. פתח /start.")
         return False
-    verdict = await moderate(bot, **content)
-    if verdict != "approved":
-        if verdict == "rejected":
-            pool = await get_pool()
-            async with pool.acquire() as connection:
-                await connection.execute(
-                    """INSERT INTO submission_rejections VALUES ($1,$2)
-                       ON CONFLICT (telegram_id) DO UPDATE SET reason=EXCLUDED.reason""",
-                    message.from_user.id, getattr(verdict, "reason", "other"),
-                )
-        await report_failure(message, verdict, delete=True)
-        return False
+    # Automatic content screening is disabled. Consent and profile validation
+    # remain required; operator holds and user reports remain available.
     return True
 
 
@@ -580,6 +570,8 @@ async def ensure_review(message, user_id: int) -> bool:
         return True
     if verdict == "missing":
         await message.answer("הפרופיל אינו שלם. לפתיחת פרופיל חדש: /resetprofile.")
+    elif verdict == "held":
+        await message.answer("הפרופיל חסום בידי מנהל. לערעור: /support.")
     else:
         await report_failure(message, verdict)
     return False
@@ -722,7 +714,7 @@ async def start(message: Message, state: FSMContext) -> None:
     if current_user and not profile_complete:
         from navigation import main_keyboard
         await message.answer(
-            "הפרופיל הקיים אינו שלם.\nאפשר לפתוח אותו מחדש.",
+            "הפרופיל הקיים אינו שלם.\nלהתחלה מחדש: /resetprofile",
             reply_markup=main_keyboard(
                 message.from_user.id == settings.support_owner_telegram_id
             ),
@@ -776,10 +768,13 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
     if callback.data == "legal:consent:decline":
         await state.clear()
         await callback.answer()
+        from navigation import main_keyboard
         await callback.message.answer(
             "לא נרשמה הסכמה.\n"
-            "הפרופיל לא נפתח.\n"
-            "/legal · /support"
+            "ההרשמה בוטלה.",
+            reply_markup=main_keyboard(
+                callback.from_user.id == settings.support_owner_telegram_id
+            ),
         )
         return
     from legal_privacy import record_current_acceptance
@@ -806,6 +801,61 @@ async def registration_consent(callback: CallbackQuery, state: FSMContext) -> No
     fresh_after_reset = bool(data.get("fresh_after_reset"))
     await state.update_data(fresh_after_reset=fresh_after_reset)
     await begin_registration(callback.message, state, callback.from_user.id)
+
+
+@router.callback_query(Registration.consent, F.data == "legal:consent:return")
+async def registration_consent_return(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    if not callback.message or callback.message.chat.type != "private":
+        await callback.answer("ההרשמה זמינה בשיחה פרטית בלבד.", show_alert=True)
+        return
+    from legal_privacy import consent_keyboard, consent_text
+    await callback.answer()
+    await callback.message.answer(
+        consent_text(),
+        reply_markup=consent_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "legal:consent:return")
+async def expired_consent_return(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await callback.answer("מסך ההסכמה אינו פעיל.", show_alert=True)
+    if (not callback.message or callback.message.chat.type != "private"
+            or await state.get_state() is not None):
+        return
+    await callback.message.answer(
+        "התהליך הסתיים.\nאפשר להתחיל הרשמה חדשה.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="התחלת הרשמה",
+                callback_data="nav:action:start",
+            )
+        ]]),
+    )
+
+
+@router.callback_query(F.data.in_({
+    "legal:consent:accept", "legal:consent:decline",
+}))
+async def expired_consent_action(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await callback.answer("המסך השתנה. ההרשמה לא אושרה.", show_alert=True)
+    if (not callback.message or callback.message.chat.type != "private"
+            or await state.get_state() is not None):
+        return
+    await callback.message.answer(
+        "אפשר לפתוח הרשמה חדשה.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="התחלת הרשמה",
+                callback_data="nav:action:start",
+            )
+        ]]),
+    )
 
 
 @router.message(Command("cancel"))

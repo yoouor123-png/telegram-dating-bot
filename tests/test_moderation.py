@@ -250,9 +250,8 @@ class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_all_photos_approval_preserves_pause_and_premium(self):
         await set_profile_visibility(self.pool, 1, False)
         with patch.object(moderation, "moderate", new_callable=AsyncMock) as check:
-            check.return_value = "approved"
             self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "approved")
-            self.assertEqual(check.call_args.kwargs["photos"], ["photo-a", "photo-b"])
+            check.assert_not_awaited()
         row = await self.pool.fetchrow("SELECT * FROM users WHERE telegram_id=1")
         self.assertFalse(row["is_active"])
         self.assertTrue(row["is_premium"])
@@ -263,36 +262,54 @@ class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "consent")
             check.assert_not_awaited()
             await record_current_acceptance(self.pool, 1, None, "Test")
-            check.return_value = "unavailable"
-            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "unavailable")
+            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "approved")
+            check.assert_not_awaited()
             self.assertEqual(await self.pool.fetchval(
-                "SELECT moderation_status FROM users WHERE telegram_id=1"), "unreviewed")
-            check.return_value = moderation.Verdict("rejected", "nudity")
+                "SELECT moderation_status FROM users WHERE telegram_id=1"), "approved")
+            await self.pool.execute(
+                """UPDATE users SET moderation_status='rejected',
+                   moderation_reason='nudity' WHERE telegram_id=1""")
             self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "rejected")
             check.reset_mock()
             self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "rejected")
             check.assert_not_awaited()
+            await self.pool.execute(
+                "UPDATE users SET admin_hold=TRUE WHERE telegram_id=1")
+            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "held")
             await self.pool.execute("DELETE FROM users WHERE telegram_id=2")
             self.assertEqual(await moderation.review_existing(self.pool, self.bot, 2), "missing")
 
     async def test_stale_revision_and_deleted_tombstone_never_approved(self):
-        for deletion in (False, True):
-            await self.pool.execute("UPDATE users SET moderation_status='unreviewed' WHERE telegram_id=1")
-            await record_current_acceptance(self.pool, 1, None, "Test")
+        await self.pool.execute(
+            "UPDATE users SET moderation_revision=moderation_revision+1 WHERE telegram_id=1")
 
-            async def concurrent_change(*args, **kwargs):
-                # Provider work can acquire another connection; no review transaction is held.
-                if deletion:
-                    await anonymize_account(self.pool, 1)
-                else:
-                    await self.pool.execute(
-                        "UPDATE users SET moderation_revision=moderation_revision+1 WHERE telegram_id=1")
-                return "approved"
+        class RacingConnection:
+            async def fetchval(inner, query, *args):
+                await self.pool.execute(
+                    """UPDATE users SET moderation_revision=moderation_revision+1
+                       WHERE telegram_id=1""")
+                return await self.pool.fetchval(query, *args)
 
-            with patch.object(moderation, "moderate", side_effect=concurrent_change):
-                self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "stale")
-            self.assertEqual(await self.pool.fetchval(
-                "SELECT moderation_status FROM users WHERE telegram_id=1"), "unreviewed")
+        class RacingPool:
+            def __init__(inner):
+                inner.acquires = 0
+
+            def acquire(inner):
+                inner.acquires += 1
+                if inner.acquires == 3:
+                    return support_tests.Acquire(RacingConnection())
+                return self.pool.acquire()
+
+        self.assertEqual(
+            await moderation.review_existing(RacingPool(), self.bot, 1), "stale")
+        self.assertEqual(await self.pool.fetchval(
+            "SELECT moderation_status FROM users WHERE telegram_id=1"), "unreviewed")
+
+        await anonymize_account(self.pool, 1)
+        self.assertEqual(
+            await moderation.review_existing(self.pool, self.bot, 1), "consent")
+        self.assertEqual(await self.pool.fetchval(
+            "SELECT moderation_status FROM users WHERE telegram_id=1"), "unreviewed")
 
     async def test_real_discovery_action_and_notification_gates(self):
         f = load_functions(
@@ -326,9 +343,9 @@ class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):
             chat=SimpleNamespace(id=1), answer=AsyncMock(),
         )
         f = load_functions(
-            "finish_photos_or_explain", Message=object, FSMContext=object,
+            "check_submission", "finish_photos_or_explain", Message=object, FSMContext=object,
             get_pool=AsyncMock(return_value=self.pool),
-            check_submission=AsyncMock(return_value=True),
+            moderate=AsyncMock(side_effect=AssertionError("Automatic screening must not run")),
             send_db_error=AsyncMock(), ReplyKeyboardRemove=lambda: None,
             show_next_profile=AsyncMock(),
         )
@@ -340,8 +357,7 @@ class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["moderation_revision"], 1)
         self.assertTrue(row["is_premium"])
         self.assertFalse(row["is_active"])
-        f.check_submission.assert_awaited_once_with(
-            message, name=data["name"], bio=data["bio"], photos=data["photos"])
+        f.moderate.assert_not_awaited()
         # An old final review cannot approve a replacement version.
         await self.pool.execute(
             "UPDATE users SET moderation_status='unreviewed',full_name='Newer' WHERE telegram_id=1")

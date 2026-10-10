@@ -10,7 +10,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 CURRENT_TERMS_VERSION = "2025-02-draft-3-owner-moderation"
 CURRENT_PRIVACY_VERSION = "2025-02-draft-3-owner-moderation"
 INCOMPLETE = (
-    "הבוט: @LoviraBot\n"
+    "הבוט: @my_love_match_bot\n"
     "אימייל לפניות: Lovirabot@gmail.com\n\n"
     "חשוב: המסמכים הם טיוטה חלקית. פרטי הזהות המשפטית של המפעיל וכתובת "
     "פיזית אינם מפורסמים כעת, ונדרשת השלמה ובדיקה משפטית בישראל. אין כאן הצהרת ציות."
@@ -54,13 +54,19 @@ def consent_keyboard():
     ])
 
 
-def legal_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
+def legal_keyboard(return_to_consent=False):
+    rows = [
         [InlineKeyboardButton(text="מדיניות פרטיות", callback_data="legal:privacy"),
          InlineKeyboardButton(text="תנאי שימוש", callback_data="legal:terms")],
         [InlineKeyboardButton(text="ביטולים והחזרים", callback_data="legal:refunds"),
          InlineKeyboardButton(text="בטיחות ודיווח", callback_data="legal:safety")],
-    ])
+    ]
+    if return_to_consent:
+        rows.append([InlineKeyboardButton(
+            text="חזרה למסך ההסכמה",
+            callback_data="legal:consent:return",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def export_chunks(lines, limit=3900):
@@ -323,39 +329,59 @@ def register_legal(dp, bot, get_pool):
             return False
         return True
 
-    async def show_policy(message, name):
-        await message.answer(POLICIES[name], reply_markup=legal_keyboard())
+    async def show_policy(message, name, return_to_consent=False):
+        await message.answer(
+            POLICIES[name],
+            reply_markup=legal_keyboard(return_to_consent),
+        )
 
     @router.message(Command("legal"))
-    async def center(message):
+    async def center(message, state):
+        return_to_consent = (
+            await state.get_state() == "Registration:consent"
+        )
         await message.answer(
-            "LoviraBot — מרכז מידע משפטי, פרטיות ובטיחות\n\n" + INCOMPLETE,
-            reply_markup=legal_keyboard(),
+            "Duvani — מרכז מידע משפטי, פרטיות ובטיחות\n\n" + INCOMPLETE,
+            reply_markup=legal_keyboard(return_to_consent),
         )
 
     @router.callback_query(F.data == "legal:center")
-    async def center_callback(callback):
+    async def center_callback(callback, state):
         await callback.answer()
         if callback.message:
-            await center(callback.message)
+            await callback.message.answer(
+                "Duvani — מרכז מידע משפטי, פרטיות ובטיחות\n\n" + INCOMPLETE,
+                reply_markup=legal_keyboard(
+                    await state.get_state() == "Registration:consent"
+                ),
+            )
 
     for command, name in (
         ("privacy", "privacy"), ("terms", "terms"),
         ("refunds", "refunds"), ("safety", "safety"),
     ):
-        async def handler(message, policy=name):
-            await show_policy(message, policy)
+        async def handler(message, policy=name, state=None):
+            await show_policy(
+                message, policy,
+                await state.get_state() == "Registration:consent"
+                if state is not None else False,
+            )
         router.message.register(handler, Command(command))
         from navigation import register_action
-        register_action(command, lambda message, state, fn=handler: fn(message))
+        register_action(
+            command, lambda message, state, fn=handler: fn(message, state=state)
+        )
 
     @router.callback_query(F.data.in_({
         "legal:privacy", "legal:terms", "legal:refunds", "legal:safety"
     }))
-    async def policy_callback(callback):
+    async def policy_callback(callback, state):
         await callback.answer()
         if callback.message:
-            await show_policy(callback.message, callback.data.split(":")[1])
+            await show_policy(
+                callback.message, callback.data.split(":")[1],
+                await state.get_state() == "Registration:consent",
+            )
 
     @router.message(Command("pause", "resume"))
     async def visibility(message):
@@ -523,7 +549,7 @@ def register_legal(dp, bot, get_pool):
         )
 
     from navigation import register_action
-    register_action("legal", lambda message, state: center(message))
+    register_action("legal", lambda message, state: center(message, state))
     register_action("pause", lambda message, state: visibility(
         message.model_copy(update={"text": "/pause"})
     ))

@@ -481,6 +481,7 @@ class PostgreSQLHandlerTests(unittest.IsolatedAsyncioTestCase):
             "start",
             Message=object,
             FSMContext=object,
+            settings=SimpleNamespace(support_owner_telegram_id=99),
             fetch_user=AsyncMock(return_value=user),
             get_pool=AsyncMock(return_value=self.pool),
             send_db_error=AsyncMock(),

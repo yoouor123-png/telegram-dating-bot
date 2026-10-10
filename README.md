@@ -116,17 +116,15 @@ After deployment, the maintenance worker attempts legacy renewal cancellation
 and processes due expiry notices. New successful payments and expiry notices are
 tested with a disposable local database and mocked Telegram calls, not live charges.
 
-## Automatic pre-publication content checks
+## Profile publication
 
-Set `OPENAI_API_KEY` as a secret on the **existing Render worker**. This is a
-direct OpenAI API integration, not a Replit integration. Do not commit the key,
-create another polling worker, or assume that a configured key proves model
-access. Missing credentials, network/provider errors, refusal, incomplete or
-malformed responses all fail closed: new/unreviewed content is not published.
-The optional operator-only private `/moderation` command reports configuration,
-not live readiness. There is no manual approval bypass. The private owner dashboard
-can inspect saved profiles, including unreviewed/rejected profiles; rejected
-registration submissions are not stored as profile content.
+Automatic AI content screening is disabled at the operator's request. Registration
+and `/start` do not call an external content model or require `OPENAI_API_KEY`.
+Publication still requires current policy acceptance, adult-age requirements,
+and a complete profile. Complete unreviewed profiles are marked publishable on
+their next `/start` or `/browse`; previously rejected profiles and administrator
+holds are not automatically cleared. Paid time and user-paused visibility are preserved.
+The private owner-only `/moderation` command reports that screening is disabled.
 
 ### Owner content moderation
 
@@ -142,8 +140,8 @@ an independent administrator hold, not account deletion), remove a photo/name/bi
 or hide individual items. Hidden items have separate restore buttons and retain
 only their necessary value (photo file ID and position, or text). Other owner
 actions preserve hidden items; confirming profile reset or deleting the account
-invalidates them. Restoring content sets `unreviewed`; `/start` runs automatic
-review before any publication. Releasing a hold neither approves content nor
+invalidates them. Restoring content sets `unreviewed`; `/start` checks completeness
+and publication restrictions without AI screening. Releasing a hold neither approves content nor
 reactivates a user-paused account. `/resume`, `/start`, profile resets and automatic approval
 cannot clear an owner hold. Incomplete content cannot publish.
 

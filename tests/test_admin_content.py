@@ -99,7 +99,7 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await set_profile_visibility(self.pool, 1, True), "incomplete")
         await self.pool.execute("UPDATE users SET moderation_status='unreviewed' WHERE telegram_id=1")
         with patch.object(moderation, "moderate", AsyncMock(return_value="approved")):
-            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "approved")
+            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "held")
         self.assertTrue((await self.user())["admin_hold"])
         self.assertEqual(await set_profile_visibility(self.pool, 1, True), "incomplete")
         data = dict(name="Edited", age=25, gender="male", target_gender="female",
@@ -142,10 +142,10 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.user())["photos"], ["one", "two"])
         self.assertEqual((await self.user())["moderation_status"], "unreviewed")
         self.assertEqual(await set_profile_visibility(self.pool, 1, True), "incomplete")
-        with patch.object(moderation, "moderate", AsyncMock(
-                return_value=moderation.Verdict("rejected", "nudity"))):
-            await moderation.review_existing(self.pool, self.bot, 1)
-        self.assertEqual((await self.user())["moderation_reason"], "nudity")
+        with patch.object(moderation, "moderate", new_callable=AsyncMock) as check:
+            self.assertEqual(await moderation.review_existing(self.pool, self.bot, 1), "approved")
+            check.assert_not_awaited()
+        self.assertIsNone((await self.user())["moderation_reason"])
         for action, field in [("hide_name", "full_name"), ("hide_bio", "bio")]:
             await self.action(action)
             self.assertEqual((await self.user())[field], "")
@@ -251,15 +251,15 @@ class PostgreSQLAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.user())["admin_hold"])
         self.assertEqual(await self.pool.fetchval("SELECT count(*) FROM content_events"), 0)
 
-    async def test_pending_registration_rejection_is_reason_only_and_durable(self):
+    async def test_registration_skips_automatic_checks_without_storing_rejections(self):
         event = message(44)
         f = review_tests.load_functions(
             "check_submission", get_pool=AsyncMock(return_value=self.pool),
             moderate=AsyncMock(return_value=moderation.Verdict("rejected", "gambling")),
             report_failure=AsyncMock(), bot=self.bot)
         await record_current_acceptance(self.pool, 44, None, "ignored")
-        self.assertFalse(await f.check_submission(event, name="Unstored rejected input"))
-        self.assertEqual(await self.pool.fetchval(
-            "SELECT reason FROM submission_rejections WHERE telegram_id=44"), "gambling")
-        await admin.show_notices(event, self.pool, 44)
-        self.assertIn("/resetprofile", "\n".join(c.args[0] for c in event.answer.call_args_list))
+        self.assertTrue(await f.check_submission(event, name="Display name"))
+        f.moderate.assert_not_awaited()
+        f.report_failure.assert_not_awaited()
+        self.assertIsNone(await self.pool.fetchval(
+            "SELECT reason FROM submission_rejections WHERE telegram_id=44"))

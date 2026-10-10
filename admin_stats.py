@@ -36,7 +36,8 @@ async def show_stats(message, get_pool, owner_id):
         return
     await message.answer(
         f"רשומים {counts['total']:,} · פעילים {counts['active']:,}\n"
-        f"ממתינים {counts['pending']:,} · Premium {counts['premium']:,}\n"
+        f"ממתינים להשלמת פרסום {counts['pending']:,} · "
+        f"Premium {counts['premium']:,}\n"
         "לרענון: /stats"
     )
 

@@ -46,7 +46,7 @@ FORMAT = {
         "required": ["allowed", "reason_code"], "additionalProperties": False,
     },
 }
-UNAVAILABLE = "בדיקת התוכן אינה זמינה כרגע. הפרופיל לא פורסם. נסה שוב מאוחר יותר."
+UNAVAILABLE = "לא ניתן להשלים את הפעולה כרגע. לא בוצע שינוי בפרופיל. נסה שוב מאוחר יותר."
 DENIED = (
     "התוכן לא אושר לפרסום. אפשר לשלוח תוכן מתוקן."
 )
@@ -207,14 +207,18 @@ async def report_failure(message, verdict, *, delete=False):
 
 
 async def review_existing(pool, bot, user_id):
-    """Snapshot, release DB connection, check, then compare-and-set revision."""
+    """Approve a complete unreviewed profile without calling an external model."""
     if not await has_current_acceptance(pool, user_id):
         return "consent"
     async with pool.acquire() as connection:
         user = await connection.fetchrow(
             "SELECT * FROM users WHERE telegram_id=$1", user_id,
         )
-    if (not user or not user["photos"] or user["latitude"] is None
+    if not user:
+        return "missing"
+    if user["admin_hold"]:
+        return "held"
+    if (not user["photos"] or user["latitude"] is None
             or user["longitude"] is None or not user["full_name"].strip()
             or not user["bio"].strip() or user["full_name"] == "נמחק"):
         return "missing"
@@ -223,33 +227,31 @@ async def review_existing(pool, bot, user_id):
     if user["moderation_status"] == "rejected":
         reason = user["moderation_reason"]
         return Verdict("rejected", reason) if reason in ALL_STORED_REASONS else "unavailable"
-    verdict = await moderate(
-        bot, name=user["full_name"], bio=user["bio"], photos=user["photos"],
-    )
+    if user["moderation_status"] != "unreviewed":
+        return "unavailable"
     async with pool.acquire() as connection:
         changed = await connection.fetchval(
-            """UPDATE users SET moderation_status=$3, moderation_reason=$4, updated_at=NOW()
+            """UPDATE users SET moderation_status='approved',
+                  moderation_reason=NULL, updated_at=NOW()
                WHERE telegram_id=$1 AND moderation_revision=$2
                  AND moderation_status='unreviewed'
-                 AND cardinality(photos)>0 AND latitude IS NOT NULL
+                  AND NOT admin_hold AND cardinality(photos)>0
+                  AND latitude IS NOT NULL AND longitude IS NOT NULL
+                  AND btrim(full_name) NOT IN ('', 'נמחק') AND btrim(bio)<>''
                RETURNING telegram_id""",
             user_id, user["moderation_revision"],
-            "unreviewed" if verdict == "unavailable" else verdict,
-            getattr(verdict, "reason", None) if verdict == "rejected" else None,
         )
-    return verdict if changed else "stale"
+    return "approved" if changed else "stale"
 
 
 async def show_configuration(message, owner_id):
     if not is_owner_private(message, owner_id):
         await message.answer("הפקודה זמינה למנהל בלבד בשיחה פרטית.")
         return
-    configured = bool(os.getenv("OPENAI_API_KEY", "").strip())
     await message.answer(
-        "בדיקה אוטומטית בלבד; אין אישור ידני.\n"
-        f"OPENAI_API_KEY: {'מוגדר' if configured else 'חסר — הפרסום חסום'}\n"
-        f"מודלים: {MODERATION_MODEL}, {REVIEW_MODEL}\n"
-        "הגדרה אינה אישור זמינות או בדיקה חיה. כשל בבדיקה חוסם פרסום."
+        "בדיקת תוכן אוטומטית כבויה.\n"
+        "נדרשים הסכמה ופרופיל שלם.\n"
+        "חסימות מנהל עדיין תקפות."
     )
 
 
