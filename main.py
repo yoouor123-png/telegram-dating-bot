@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 from legal_privacy import coarse_distance_text
 from moderation import report_failure, review_existing, register_moderation
+from conversation_storage import PostgresFSMStorage, PollingLease
 from profile_reset import new_reset_token
 from profile_callbacks import (
     fetch_profile_detail,
@@ -113,7 +114,10 @@ class Settings:
 
 settings = Settings.from_env()
 bot = Bot(token=settings.bot_token)
-dp = Dispatcher(events_isolation=SimpleEventIsolation())
+dp = Dispatcher(
+    storage=PostgresFSMStorage(lambda: get_pool()),
+    events_isolation=SimpleEventIsolation(),
+)
 router = Router()
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
@@ -342,6 +346,20 @@ CREATE TABLE IF NOT EXISTS hidden_content (
     telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     revision INTEGER NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
     position INTEGER
+);
+CREATE TABLE IF NOT EXISTS telegram_fsm (
+    storage_key TEXT PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    state TEXT,
+    data JSONB NOT NULL DEFAULT '{}',
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS telegram_fsm_user_idx ON telegram_fsm(telegram_id);
+CREATE INDEX IF NOT EXISTS telegram_fsm_expiry_idx ON telegram_fsm(expires_at);
+CREATE TABLE IF NOT EXISTS telegram_polling_lease (
+    bot_id BIGINT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE OR REPLACE FUNCTION content_complete(u users) RETURNS BOOLEAN
 LANGUAGE SQL IMMUTABLE AS $$
@@ -1727,13 +1745,17 @@ async def fallback(message: Message) -> None:
 
 
 async def main() -> None:
+    lease = PollingLease(get_pool, bot.id)
     dp.startup.register(startup)
+    # Polling has stopped by the time shutdown runs; release before pool.close.
+    dp.shutdown.register(lease.stop)
     dp.shutdown.register(shutdown)
-    await bot.delete_webhook(drop_pending_updates=False)
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types(),
-    )
+    async with lease:
+        await bot.delete_webhook(drop_pending_updates=False)
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
 
 
 def register_handlers() -> None:

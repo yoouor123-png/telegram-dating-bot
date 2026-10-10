@@ -128,6 +128,12 @@ An empty row retained by a confirmed reset can finish registration after a worke
 restart while retaining Premium and administrator holds. A user-paused nonempty
 profile remains paused when incomplete content is replaced.
 
+Conversation state is shared in PostgreSQL, rather than worker memory. Drafts
+expire after 24 hours, are cleaned periodically, and are removed on completion,
+cancellation and account deletion. A renewable PostgreSQL lease permits only one
+polling owner during deployments. Loss of ownership or a failed renewal stops
+the polling owner; shutdown releases the lease before closing the pool.
+
 Automatic AI content screening is disabled at the operator's request. Registration
 and `/start` do not call an external content model or require `OPENAI_API_KEY`.
 Publication still requires current policy acceptance, adult-age requirements,

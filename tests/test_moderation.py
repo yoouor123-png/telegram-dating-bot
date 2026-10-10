@@ -388,7 +388,8 @@ class PostgreSQLModerationTests(unittest.IsolatedAsyncioTestCase):
 class SourceSafetyTests(unittest.TestCase):
     def test_isolation_and_early_operator_router(self):
         source = (ROOT / "main.py").read_text()
-        self.assertIn("Dispatcher(events_isolation=SimpleEventIsolation())", source)
+        self.assertIn("events_isolation=SimpleEventIsolation()", source)
+        self.assertIn("storage=PostgresFSMStorage", source)
         self.assertLess(source.index("register_moderation(dp, settings."),
                         source.index("support_service = register_support("))
         self.assertIn("WHERE users.moderation_revision = $11", source)

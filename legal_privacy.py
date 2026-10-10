@@ -193,6 +193,8 @@ async def anonymize_account(pool, telegram_id):
     """Anonymize rather than delete the user row, preserving payment FKs."""
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await connection.execute(
+                "DELETE FROM telegram_fsm WHERE telegram_id=$1", telegram_id)
             # Serialize deletion against administrator revision-guarded mutations.
             await connection.fetchval(
                 "SELECT telegram_id FROM users WHERE telegram_id=$1 FOR UPDATE", telegram_id)
