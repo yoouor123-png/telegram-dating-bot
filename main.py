@@ -707,19 +707,17 @@ async def start(message: Message, state: FSMContext) -> None:
         and current_user["latitude"] is not None
         and current_user["longitude"] is not None
         and current_user["photos"]
-        and current_user["moderation_status"] != "rejected"
         and current_user["full_name"].strip() not in {"", "נמחק"}
         and current_user["bio"].strip()
     )
-    if current_user and not profile_complete:
-        from navigation import main_keyboard
-        await message.answer(
-            "הפרופיל הקיים אינו שלם.\nלהתחלה מחדש: /resetprofile",
-            reply_markup=main_keyboard(
-                message.from_user.id == settings.support_owner_telegram_id
-            ),
-        )
-        return
+    rejected = bool(current_user and current_user["moderation_status"] == "rejected")
+    # A confirmed reset leaves an empty row to retain Premium and restrictions.
+    # Its in-memory flag can be lost on a restart; recover it from the empty row.
+    fresh_after_reset = bool(
+        current_user and not current_user["full_name"].strip()
+        and not current_user["bio"].strip() and not current_user["photos"]
+        and current_user["latitude"] is None and current_user["longitude"] is None
+    )
 
     if not profile_complete:
         from navigation import main_keyboard
@@ -735,12 +733,17 @@ async def start(message: Message, state: FSMContext) -> None:
             message.from_user.id,
             message,
             state,
-            existing_profile=profile_complete,
+            existing_profile=profile_complete or rejected,
+            fresh_after_reset=fresh_after_reset,
         )
     except Exception:
         await send_db_error(message)
         return
     if not accepted:
+        return
+
+    if rejected:
+        await ensure_review(message, message.from_user.id)
         return
 
     if profile_complete:
@@ -754,6 +757,7 @@ async def start(message: Message, state: FSMContext) -> None:
         )
         await show_next_profile(message.chat.id)
         return
+    await state.update_data(fresh_after_reset=fresh_after_reset)
     await begin_registration(message, state, message.from_user.id)
 
 
@@ -948,12 +952,14 @@ async def registration_gender(
     await state.update_data(
         gender=gender,
         target_gender="female" if gender == "male" else "male",
+        bio="כאן כדי להכיר.",
+        photos=[],
     )
     await message.answer(
-        "כתוב תיאור קצר על עצמך (עד 500 תווים):",
+        "שלח תמונה אחת לפרופיל.\nההרשמה תושלם מיד.",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(Registration.bio)
+    await state.set_state(Registration.photos)
 
 
 @router.message(Registration.gender)
@@ -992,8 +998,8 @@ async def registration_photo(
         return
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await message.answer(
-        f"התמונה נקלטה ({len(photos)}/{MAX_PHOTOS})."
+    await finish_photos_or_explain(
+        message.model_copy(update={"text": "סיימתי"}), state,
     )
 
 
@@ -1082,12 +1088,12 @@ async def finish_photos_or_explain(
 
     if saved is None:
         await state.clear()
-        await message.answer("הפרופיל השתנה בזמן הבדיקה ולא פורסם. התחל שוב עם /start.")
+        await message.answer("הפרופיל השתנה ולא נשמר.\nלהרשמה מחדש: /start")
         return
     await state.clear()
     from navigation import main_keyboard
     await message.answer(
-        "הפרופיל אושר ונשמר.",
+        "נרשמת בהצלחה.\nאפשר להתחיל להכיר.",
         reply_markup=main_keyboard(
             message.from_user.id == getattr(
                 globals().get("settings"), "support_owner_telegram_id", None
@@ -1286,9 +1292,9 @@ async def profile(message: Message) -> None:
         else "לא פעיל"
     )
     review_status = {
-        "approved": "מאושר",
+        "approved": "ההרשמה הושלמה",
         "rejected": "נדחה",
-        "unreviewed": "ממתין לבדיקה",
+        "unreviewed": "ההרשמה טרם הושלמה",
     }.get(user["moderation_status"], "לא ידוע")
     from message_pages import short_pages
     name_preview = short_pages(

@@ -118,6 +118,14 @@ tested with a disposable local database and mocked Telegram calls, not live char
 
 ## Profile publication
 
+Basic registration asks for a display name, adult age, location, gender and one
+photo. A neutral default description is supplied; the first photo saves the
+profile immediately, without a "finished" message or separate approval screen.
+`/start` lets incomplete accounts register directly without a manual reset.
+An empty row retained by a confirmed reset can finish registration after a worker
+restart while retaining Premium and administrator holds. A user-paused nonempty
+profile remains paused when incomplete content is replaced.
+
 Automatic AI content screening is disabled at the operator's request. Registration
 and `/start` do not call an external content model or require `OPENAI_API_KEY`.
 Publication still requires current policy acceptance, adult-age requirements,

@@ -477,6 +477,7 @@ class PostgreSQLHandlerTests(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM users WHERE telegram_id=1"
         ))
         user["bio"] = ""
+        user["moderation_status"] = "unreviewed"
         start = load_function(
             "start",
             Message=object,
@@ -491,7 +492,7 @@ class PostgreSQLHandlerTests(unittest.IsolatedAsyncioTestCase):
             ReplyKeyboardRemove=lambda: None,
             show_next_profile=AsyncMock(),
         )
-        state = SimpleNamespace(clear=AsyncMock())
+        state = SimpleNamespace(clear=AsyncMock(), update_data=AsyncMock())
         message = SimpleNamespace(
             from_user=SimpleNamespace(id=1),
             chat=SimpleNamespace(id=1),
@@ -507,6 +508,6 @@ class PostgreSQLHandlerTests(unittest.IsolatedAsyncioTestCase):
                FROM users WHERE telegram_id=1"""
         )
         self.assertEqual(before, after)
-        start.__globals__["require_current_consent"].assert_not_awaited()
-        start.__globals__["begin_registration"].assert_not_awaited()
-        self.assertIn("/resetprofile", message.answer.call_args.args[0])
+        start.__globals__["require_current_consent"].assert_awaited_once()
+        start.__globals__["begin_registration"].assert_awaited_once_with(message, state, 1)
+        self.assertNotIn("/resetprofile", message.answer.call_args.args[0])
