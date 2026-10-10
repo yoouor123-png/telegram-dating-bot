@@ -40,7 +40,7 @@ async def reset_profile(pool, telegram_id: int, expected_revision: int) -> str:
             await connection.execute(
                 """UPDATE users SET full_name='', age=18, gender='male',
                    target_gender='female', bio='', photos='{}',
-                   latitude=NULL, longitude=NULL, is_active=FALSE,
+                   latitude=NULL, longitude=NULL, city=NULL, is_active=FALSE,
                    moderation_status='unreviewed',
                    moderation_reason=CASE WHEN admin_hold THEN moderation_reason ELSE NULL END,
                    moderation_revision=moderation_revision+1,

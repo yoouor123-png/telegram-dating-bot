@@ -118,10 +118,15 @@ tested with a disposable local database and mocked Telegram calls, not live char
 
 ## Profile publication
 
-Basic registration asks for a display name, adult age, location, gender and one
+Basic registration asks for a display name, adult age, typed city, gender and one
 photo. A neutral default description is supplied; the first photo saves the
 profile immediately, without a "finished" message or separate approval screen.
 `/start` lets incomplete accounts register directly without a manual reset.
+The city is entered as text; no GPS permission or external geocoder is required.
+City-only profiles remain complete and eligible for browsing, reactivation and
+matching. Same-city candidates are prioritized, and profiles show the city
+instead of inventing a distance. Legacy coordinate-based profiles remain valid.
+Profile reset and account anonymization also erase the city; data exports include it.
 Previously rejected accounts can also register fresh content directly; their old
 content stays rejected until the replacement registration has been saved.
 An empty row retained by a confirmed reset can finish registration after a worker

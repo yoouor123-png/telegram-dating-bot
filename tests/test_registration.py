@@ -9,7 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from aiogram import Dispatcher, Router
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.methods import SendMessage
+from aiogram.methods import SendMessage, SendPhoto
 from aiogram.types import Location, PhotoSize, Update
 
 import main
@@ -47,6 +47,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.update_id = 0
         self.provider = AsyncMock(side_effect=AssertionError("AI must not run"))
         self.browse = AsyncMock()
+        self.render_profile = main.show_next_profile
         for target, attribute, replacement in [
             (main, "get_pool", AsyncMock(return_value=self.pool)),
             (main, "bot", self.bot),
@@ -128,9 +129,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.state.get_state(), main.Registration.location.state,
         )
-        await self.feed(
-            location=Location(latitude=32.0, longitude=34.0),
-        )
+        await self.feed("תל אביב")
         self.assertEqual(
             await self.state.get_state(), main.Registration.gender.state,
         )
@@ -166,6 +165,9 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["full_name"], "Display name")
         self.assertEqual(row["age"], 29)
         self.assertEqual(row["photos"], ["new-photo"])
+        self.assertEqual(row["city"], "תל אביב")
+        self.assertIsNone(row["latitude"])
+        self.assertIsNone(row["longitude"])
         self.assertEqual(row["moderation_status"], "approved")
         self.assertTrue(row["is_active"])
         self.assertTrue(row["bio"])
@@ -245,7 +247,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         await self.click("nav:action:start")
         await self.feed("Display name")
         await self.feed("29")
-        await self.feed(location=Location(latitude=32.0, longitude=34.0))
+        await self.feed("חיפה")
         self.assertEqual(
             await self.state.get_state(), main.Registration.gender.state,
         )
@@ -268,6 +270,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["gender"], "female")
         self.assertEqual(row["target_gender"], "male")
         self.assertEqual(row["photos"], ["female-photo"])
+        self.assertEqual(row["city"], "חיפה")
         self.assertTrue(row["is_active"])
         self.assertIsNone(await self.state.get_state())
         self.assertEqual(
@@ -340,7 +343,7 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         await self.click("nav:action:start")
         await self.feed("Display name")
         await self.feed("29")
-        await self.feed(location=Location(latitude=32.0, longitude=34.0))
+        await self.feed("חיפה")
         await self.feed("נקבה")
 
     async def test_shutdown_drains_photo_save_before_resources_close(self):
@@ -437,3 +440,92 @@ class BasicRegistrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(row["telegram_id"], USER.id)
         self.assertEqual(row["photos"], ["retry-photo"])
+
+    async def test_invalid_city_stays_on_location_then_text_continues(self):
+        await self.accept()
+        await self.click("nav:action:start")
+        await self.feed("Display name")
+        await self.feed("29")
+        for value in ["12345", "x", "/unknown", "<script>", "א" * 81]:
+            await self.feed(value)
+            self.assertEqual(
+                await self.state.get_state(), main.Registration.location.state,
+            )
+        self.assertIsNone(await self.pool.fetchval(
+            "SELECT telegram_id FROM users WHERE telegram_id=$1", USER.id,
+        ))
+        await self.feed("  באר   שבע ")
+        self.assertEqual(
+            await self.state.get_state(), main.Registration.gender.state,
+        )
+        self.assertEqual((await self.state.get_data())["city"], "באר שבע")
+        self.assertFalse(any("דרך הכפתור" in text for text in self.messages()))
+
+    async def test_city_only_profile_browses_shows_city_and_never_restarts_signup(self):
+        from legal_privacy import set_profile_visibility
+        from profile_reset import reset_profile
+        await self.accept()
+        await self.click("nav:action:start")
+        row = await self.fill_basic()
+        self.assertTrue(main.visible_profile(row))
+        self.assertTrue(await self.pool.fetchval(
+            "SELECT content_complete(users) FROM users WHERE telegram_id=$1",
+            USER.id,
+        ))
+        await self.pool.execute(
+            """INSERT INTO users(telegram_id,full_name,age,gender,target_gender,
+                    bio,photos,city,moderation_status)
+               VALUES($1,'Candidate',25,'female','male','Bio',ARRAY['candidate'],
+                      'תל אביב','approved'),
+                     ($2,'Other city',25,'female','male','Bio',ARRAY['other'],
+                      'חיפה','approved')""",
+            USER.id + 1, USER.id + 2,
+        )
+        candidate, distance = await main.next_candidate(USER.id)
+        self.assertEqual(candidate["telegram_id"], USER.id + 1)
+        self.assertIsNone(distance)
+        await self.render_profile(USER.id)
+        photo = next(
+            c for c in reversed(self.session.calls) if isinstance(c, SendPhoto)
+        )
+        self.assertIn("עיר: תל אביב", photo.caption)
+        self.assertNotIn("מרחק:", photo.caption)
+        self.assertEqual(
+            await moderation.review_existing(self.pool, self.bot, USER.id),
+            "approved",
+        )
+        await self.feed("/start")
+        self.assertIsNone(await self.state.get_state())
+        self.assertEqual(self.messages()[-1], "הפרופיל שלך כבר קיים.")
+        self.assertTrue(await set_profile_visibility(self.pool, USER.id, False))
+        self.assertTrue(await set_profile_visibility(self.pool, USER.id, True))
+        self.assertEqual(await reset_profile(
+            self.pool, USER.id, row["moderation_revision"],
+        ), "reset")
+        self.assertIsNone(await self.pool.fetchval(
+            "SELECT city FROM users WHERE telegram_id=$1", USER.id,
+        ))
+
+    async def test_legacy_location_message_still_works_and_deletion_clears_city(self):
+        from legal_privacy import anonymize_account
+        await self.accept()
+        await self.click("nav:action:start")
+        await self.feed("Display name")
+        await self.feed("29")
+        await self.feed(location=Location(latitude=32.0, longitude=34.0))
+        self.assertEqual(
+            await self.state.get_state(), main.Registration.gender.state,
+        )
+        self.assertIsNone((await self.state.get_data())["city"])
+        await self.feed("נקבה")
+        await self.feed(photo=[PhotoSize(
+            file_id="legacy-photo", file_unique_id="legacy-id", width=640, height=640,
+        )])
+        await self.pool.execute(
+            "UPDATE users SET city='Private city' WHERE telegram_id=$1", USER.id,
+        )
+        await anonymize_account(self.pool, USER.id)
+        row = await self.pool.fetchrow(
+            "SELECT city,latitude,longitude FROM users WHERE telegram_id=$1", USER.id,
+        )
+        self.assertEqual(dict(row), {"city": None, "latitude": None, "longitude": None})

@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS users (
     photos TEXT[] NOT NULL DEFAULT '{}',
     latitude DOUBLE PRECISION,
     longitude DOUBLE PRECISION,
+    city TEXT,
     is_premium BOOLEAN NOT NULL DEFAULT FALSE,
     premium_until TIMESTAMPTZ,
     telegram_payment_charge_id TEXT,
@@ -235,6 +236,7 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_payment_charge_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
@@ -366,7 +368,8 @@ CREATE OR REPLACE FUNCTION content_complete(u users) RETURNS BOOLEAN
 LANGUAGE SQL IMMUTABLE AS $$
     SELECT NOT u.admin_hold AND btrim(u.full_name) NOT IN ('', 'נמחק')
         AND btrim(u.bio) <> '' AND cardinality(u.photos)>0
-        AND u.latitude IS NOT NULL AND u.longitude IS NOT NULL
+        AND (NULLIF(btrim(u.city), '') IS NOT NULL
+             OR (u.latitude IS NOT NULL AND u.longitude IS NOT NULL))
 $$;
 """
 
@@ -429,16 +432,6 @@ async def shutdown() -> None:
     logger.info("Bot stopped")
 
 
-def location_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="שתף מיקום 📍", request_location=True)]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
 def gender_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="זכר"), KeyboardButton(text="נקבה")]],
@@ -491,7 +484,7 @@ async def fetch_user(user_id: int):
         return await connection.fetchrow(
             """
             SELECT telegram_id, username, full_name, age, gender,
-                   target_gender, bio, photos, latitude, longitude,
+                   target_gender, bio, photos, latitude, longitude, city,
                    is_premium, premium_until, daily_likes_count,
                    last_like_reset, is_active, moderation_status, moderation_revision,
                    admin_hold, moderation_reason
@@ -727,8 +720,9 @@ async def start(message: Message, state: FSMContext) -> None:
 
     profile_complete = bool(
         current_user
-        and current_user["latitude"] is not None
-        and current_user["longitude"] is not None
+        and (bool((current_user.get("city") or "").strip())
+             or (current_user["latitude"] is not None
+                 and current_user["longitude"] is not None))
         and current_user["photos"]
         and current_user["moderation_status"] != "rejected"
         and current_user["full_name"].strip() not in {"", "נמחק"}
@@ -740,6 +734,7 @@ async def start(message: Message, state: FSMContext) -> None:
         current_user and not current_user["full_name"].strip()
         and not current_user["bio"].strip() and not current_user["photos"]
         and current_user["latitude"] is None and current_user["longitude"] is None
+        and not (current_user.get("city") or "").strip()
     )
 
     if not profile_complete:
@@ -940,8 +935,8 @@ async def registration_age(
 
     await state.update_data(age=age)
     await message.answer(
-        "שלח את המיקום שלך באמצעות הכפתור:",
-        reply_markup=location_keyboard(),
+        "באיזו עיר את/ה גר/ה?\nכתוב את שם העיר בהודעה.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(Registration.location)
 
@@ -953,14 +948,30 @@ async def registration_location(
     await state.update_data(
         latitude=message.location.latitude,
         longitude=message.location.longitude,
+        city=None,
     )
     await message.answer("מה המין שלך?", reply_markup=gender_keyboard())
     await state.set_state(Registration.gender)
 
 
+@router.message(Registration.location, F.text)
+async def registration_city(message: Message, state: FSMContext) -> None:
+    city = " ".join(message.text.split())
+    if (not 2 <= len(city) <= 80
+            or sum(c.isalpha() for c in city) < 2
+            or any(not (c.isalpha() or c.isspace() or c in "-'׳’״.,()")
+                   for c in city)):
+        await message.answer("כתוב שם עיר בלבד.\nלדוגמה: תל אביב או חיפה.")
+        return
+    # Text locations are intentional: no GPS permission or geocoding dependency.
+    await state.update_data(city=city, latitude=None, longitude=None)
+    await state.set_state(Registration.gender)
+    await message.answer("מה המין שלך?", reply_markup=gender_keyboard())
+
+
 @router.message(Registration.location)
 async def invalid_location(message: Message) -> None:
-    await message.answer("נא לשלוח מיקום דרך הכפתור 📍.")
+    await message.answer("כתוב את שם העיר בהודעה.\nאין צורך בשיתוף מיקום.")
 
 
 @router.message(Registration.gender, F.text.in_(["זכר", "נקבה"]))
@@ -1073,11 +1084,11 @@ async def finish_photos_or_explain(
                 INSERT INTO users (
                     telegram_id, username, full_name, age, gender,
                     target_gender, bio, photos, latitude, longitude,
-                    is_active, updated_at, moderation_status
+                    city, is_active, updated_at, moderation_status
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    TRUE, NOW(), 'approved'
+                    $13, TRUE, NOW(), 'approved'
                 )
                 ON CONFLICT (telegram_id) DO UPDATE SET
                     username = EXCLUDED.username,
@@ -1089,6 +1100,7 @@ async def finish_photos_or_explain(
                     photos = EXCLUDED.photos,
                     latitude = EXCLUDED.latitude,
                     longitude = EXCLUDED.longitude,
+                    city = EXCLUDED.city,
                     moderation_status = 'approved',
                     moderation_reason = CASE
                         WHEN users.admin_hold THEN users.moderation_reason
@@ -1111,10 +1123,11 @@ async def finish_photos_or_explain(
                 data["target_gender"],
                 data["bio"],
                 photos,
-                data["latitude"],
-                data["longitude"],
+                data.get("latitude"),
+                data.get("longitude"),
                 data.get("profile_revision", -1),
                 bool(data.get("fresh_after_reset")),
+                data.get("city"),
             )
     except Exception as error:
         logger.error("Registration save failed (%s)", type(error).__name__)
@@ -1176,7 +1189,7 @@ async def next_candidate(viewer_id: int):
     async with connection_pool.acquire() as connection:
         viewer = await connection.fetchrow(
             """
-            SELECT telegram_id, gender, target_gender, latitude, longitude,
+            SELECT telegram_id, gender, target_gender, latitude, longitude, city,
                    is_premium, premium_until
             FROM users
             WHERE telegram_id = $1 AND is_active = TRUE
@@ -1191,7 +1204,7 @@ async def next_candidate(viewer_id: int):
         candidates = await connection.fetch(
             """
             SELECT c.telegram_id, c.username, c.full_name, c.age, c.bio,
-                   c.photos, c.latitude, c.longitude, c.is_premium,
+                   c.photos, c.latitude, c.longitude, c.city, c.is_premium,
                    c.premium_until
             FROM users AS c
             WHERE c.telegram_id <> $1
@@ -1200,8 +1213,6 @@ async def next_candidate(viewer_id: int):
               AND c.is_active = TRUE
               AND c.moderation_status = 'approved'
               AND content_complete(c)
-              AND c.latitude IS NOT NULL
-              AND c.longitude IS NOT NULL
               AND cardinality(c.photos) > 0
               AND NOT EXISTS (
                   SELECT 1 FROM interactions AS i
@@ -1221,13 +1232,22 @@ async def next_candidate(viewer_id: int):
 
     enriched = []
     for candidate in candidates:
-        distance = distance_km(
-            viewer["latitude"],
-            viewer["longitude"],
-            candidate["latitude"],
-            candidate["longitude"],
+        distance = None
+        if all(value is not None for value in (
+            viewer["latitude"], viewer["longitude"],
+            candidate["latitude"], candidate["longitude"],
+        )):
+            distance = distance_km(
+                viewer["latitude"], viewer["longitude"],
+                candidate["latitude"], candidate["longitude"],
+            )
+        same_city = bool(
+            (viewer.get("city") or "").strip()
+            and (viewer.get("city") or "").strip().casefold()
+            == (candidate.get("city") or "").strip().casefold()
         )
-        bucket = int(distance // DISTANCE_BUCKET_KM)
+        bucket = (0 if same_city else int(distance // DISTANCE_BUCKET_KM)
+                  if distance is not None else math.inf)
         enriched.append(
             (
                 bucket,
@@ -1238,7 +1258,9 @@ async def next_candidate(viewer_id: int):
         )
     if not enriched:
         return None
-    enriched.sort(key=lambda item: (item[0], item[1], item[2]))
+    enriched.sort(key=lambda item: (
+        item[0], item[1], item[2] if item[2] is not None else math.inf,
+    ))
     return enriched[0][3], enriched[0][2]
 
 
@@ -1273,10 +1295,16 @@ async def show_next_profile(chat_id: int) -> None:
         f"{candidate['full_name']}, {candidate['age']}{premium}", width=30,
     )[0].splitlines()[0]
     preview = short_pages(candidate["bio"] or "ללא תיאור", width=30)[0].splitlines()[0]
+    location_preview = (
+        f"מרחק: {coarse_distance_text(distance)}" if distance is not None
+        else f"עיר: {candidate['city']}" if candidate.get("city")
+        else "המרחק אינו זמין"
+    )
+    location_preview = short_pages(location_preview, width=30)[0].splitlines()[0]
     caption = (
         f"{name_preview}\n"
         f"{preview}\n"
-        f"מרחק: {coarse_distance_text(distance)}"
+        f"{location_preview}"
     )
     try:
         await bot.send_photo(
@@ -1550,7 +1578,9 @@ def visible_profile(user) -> bool:
                 and not user.get("admin_hold", False)
                 and user.get("full_name", "").strip() not in ("", "נמחק")
                 and user.get("bio", "").strip() and user.get("photos")
-                and user.get("latitude") is not None and user.get("longitude") is not None)
+                and (bool((user.get("city") or "").strip())
+                     or (user.get("latitude") is not None
+                         and user.get("longitude") is not None)))
 
 
 def user_link(user_id: int, username: Optional[str]) -> str:

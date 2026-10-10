@@ -216,7 +216,7 @@ async def anonymize_account(pool, telegram_id):
                 "DELETE FROM policy_acceptances WHERE telegram_id=$1", telegram_id)
             return await connection.fetchval(
                 """UPDATE users SET username=NULL, full_name='נמחק', bio='',
-                   photos='{}', latitude=NULL, longitude=NULL, is_active=FALSE,
+                   photos='{}', latitude=NULL, longitude=NULL, city=NULL, is_active=FALSE,
                    moderation_status='unreviewed', moderation_reason=NULL, admin_hold=FALSE,
                    moderation_revision=moderation_revision+1,
                    age=18, gender='male', target_gender='female',
@@ -240,7 +240,8 @@ async def set_profile_visibility(pool, telegram_id, active):
                    WHERE telegram_id=$1 AND full_name<>'נמחק'
                      AND content_complete(users)
                      AND moderation_status='approved'
-                     AND latitude IS NOT NULL AND longitude IS NOT NULL
+                     AND (NULLIF(btrim(city), '') IS NOT NULL
+                          OR (latitude IS NOT NULL AND longitude IS NOT NULL))
                      AND cardinality(photos)>0 AND bio<>''
                    RETURNING telegram_id""",
                 telegram_id,
@@ -431,7 +432,7 @@ def register_legal(dp, bot, get_pool):
             async with pool.acquire() as connection:
                 user = await connection.fetchrow(
                 """SELECT telegram_id,username,full_name,age,gender,target_gender,
-                   bio,photos,latitude,longitude,is_premium,premium_until,
+                   bio,photos,latitude,longitude,city,is_premium,premium_until,
                    is_active,moderation_status,moderation_revision,created_at,updated_at
                    FROM users WHERE telegram_id=$1""",
                 message.from_user.id,

@@ -218,8 +218,10 @@ async def review_existing(pool, bot, user_id):
         return "missing"
     if user["admin_hold"]:
         return "held"
-    if (not user["photos"] or user["latitude"] is None
-            or user["longitude"] is None or not user["full_name"].strip()
+    if (not user["photos"]
+            or not ((user.get("city") or "").strip()
+                    or (user["latitude"] is not None and user["longitude"] is not None))
+            or not user["full_name"].strip()
             or not user["bio"].strip() or user["full_name"] == "נמחק"):
         return "missing"
     if user["moderation_status"] == "approved":
@@ -236,7 +238,8 @@ async def review_existing(pool, bot, user_id):
                WHERE telegram_id=$1 AND moderation_revision=$2
                  AND moderation_status='unreviewed'
                   AND NOT admin_hold AND cardinality(photos)>0
-                  AND latitude IS NOT NULL AND longitude IS NOT NULL
+                  AND (NULLIF(btrim(city), '') IS NOT NULL
+                       OR (latitude IS NOT NULL AND longitude IS NOT NULL))
                   AND btrim(full_name) NOT IN ('', 'נמחק') AND btrim(bio)<>''
                RETURNING telegram_id""",
             user_id, user["moderation_revision"],
